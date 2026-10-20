@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]          # git tag v0.1.0 && git push origin v0.1.0
+
+permissions:
+  contents: write         # Release 생성에 필요
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test           # 테스트 통과해야만 배포
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          zip -r "dist/robot-${GITHUB_REF_NAME}.zip" src drl requirements.txt README.md \
+            -x '*__pycache__*'
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.zip --generate-notes
