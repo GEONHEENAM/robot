@@ -13,19 +13,32 @@
               "ERROR,메시지\n"                    작업 오류
 """
 
-import sys
 import csv
 import datetime
+import sys
 
+from pymodbus.client import ModbusTcpClient
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QBrush, QColor, QFont
-from PyQt6.QtNetwork import QTcpSocket, QAbstractSocket
+from PyQt6.QtNetwork import QAbstractSocket, QTcpSocket
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QLabel, QLineEdit, QPushButton, QGroupBox,
-    QGridLayout, QHBoxLayout, QVBoxLayout, QTableWidget, QTableWidgetItem,
-    QPlainTextEdit, QTabWidget, QFileDialog, QHeaderView, QSpinBox,
+    QApplication,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
-from pymodbus.client import ModbusTcpClient
 
 # ========================= 설정 =========================
 DEFAULT_MB_IP, DEFAULT_MB_PORT = "127.0.0.1", 502
@@ -56,7 +69,12 @@ for i in range(6):
 
 STATE_IDLE, STATE_BUSY, STATE_DONE, STATE_ERROR = 0, 1, 2, 3
 STATE_TEXT = {STATE_IDLE: "대기", STATE_BUSY: "작업 중", STATE_DONE: "완료", STATE_ERROR: "오류"}
-STATE_COLOR = {STATE_IDLE: "#6b7280", STATE_BUSY: "#d97706", STATE_DONE: "#16a34a", STATE_ERROR: "#dc2626"}
+STATE_COLOR = {
+    STATE_IDLE: "#6b7280",
+    STATE_BUSY: "#d97706",
+    STATE_DONE: "#16a34a",
+    STATE_ERROR: "#dc2626",
+}
 
 
 # ========================= 유틸 =========================
@@ -115,12 +133,16 @@ class RobotUI(QWidget):
         g = QGridLayout(conn)
 
         self.mb_ip = QLineEdit(DEFAULT_MB_IP)
-        self.mb_port = QSpinBox(); self.mb_port.setRange(1, 65535); self.mb_port.setValue(DEFAULT_MB_PORT)
+        self.mb_port = QSpinBox()
+        self.mb_port.setRange(1, 65535)
+        self.mb_port.setValue(DEFAULT_MB_PORT)
         self.mb_btn = QPushButton("연결")
         self.mb_status = QLabel()
 
         self.rb_ip = QLineEdit(DEFAULT_ROBOT_IP)
-        self.rb_port = QSpinBox(); self.rb_port.setRange(1, 65535); self.rb_port.setValue(DEFAULT_ROBOT_PORT)
+        self.rb_port = QSpinBox()
+        self.rb_port.setRange(1, 65535)
+        self.rb_port.setValue(DEFAULT_ROBOT_PORT)
         self.rb_btn = QPushButton("연결")
         self.rb_status = QLabel()
 
@@ -129,8 +151,10 @@ class RobotUI(QWidget):
             ("로봇", self.rb_ip, self.rb_port, self.rb_btn, self.rb_status),
         ]):
             g.addWidget(QLabel(name), row, 0)
-            g.addWidget(QLabel("IP"), row, 1); g.addWidget(ip, row, 2)
-            g.addWidget(QLabel("Port"), row, 3); g.addWidget(port, row, 4)
+            g.addWidget(QLabel("IP"), row, 1)
+            g.addWidget(ip, row, 2)
+            g.addWidget(QLabel("Port"), row, 3)
+            g.addWidget(port, row, 4)
             g.addWidget(btn, row, 5)
             g.addWidget(st, row, 6)
         self.set_conn_label(self.mb_status, False)
@@ -146,14 +170,18 @@ class RobotUI(QWidget):
         self.task_state = QLabel()
         self.task_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.task_state.setMinimumWidth(160)
-        h.addWidget(self.btn_task1); h.addWidget(self.btn_task2)
-        h.addWidget(QLabel("상태:")); h.addWidget(self.task_state)
+        h.addWidget(self.btn_task1)
+        h.addWidget(self.btn_task2)
+        h.addWidget(QLabel("상태:"))
+        h.addWidget(self.task_state)
 
         # 3) 로봇 위치 표 (서버 레지스터 재조회 값, 0.1 단위)
         pos = QGroupBox("로봇 위치 (서버 레지스터 기준)")
         ph = QHBoxLayout(pos)
         tcp_box, self.tcp_table = self._make_pos_table("TCP 좌표", ["X", "Y", "Z"], "위치 [mm]")
-        jnt_box, self.joint_table = self._make_pos_table("관절 각도", [f"J{i + 1}" for i in range(6)], "각도 [°]")
+        jnt_box, self.joint_table = self._make_pos_table(
+            "관절 각도", [f"J{i + 1}" for i in range(6)], "각도 [°]"
+        )
         ph.addWidget(tcp_box, 3)
         ph.addWidget(jnt_box, 6)
         self.base_xyz = self.base_joint = None     # 작업 시작 시점 값 (변화량 기준)
@@ -180,8 +208,12 @@ class RobotUI(QWidget):
         self.btn_csv_load = QPushButton("CSV 불러오기")
         self.btn_csv_save = QPushButton("CSV 저장")
         self.btn_csv_clear = QPushButton("지우기")
-        cb.addWidget(self.btn_csv_load); cb.addWidget(self.btn_csv_save); cb.addWidget(self.btn_csv_clear); cb.addStretch()
-        cv.addLayout(cb); cv.addWidget(self.csv_table)
+        cb.addWidget(self.btn_csv_load)
+        cb.addWidget(self.btn_csv_save)
+        cb.addWidget(self.btn_csv_clear)
+        cb.addStretch()
+        cv.addLayout(cb)
+        cv.addWidget(self.csv_table)
 
         tabs = QTabWidget()
         tabs.addTab(self.reg_table, "레지스터 모니터")
@@ -190,9 +222,11 @@ class RobotUI(QWidget):
         # 5) 작업 결과 2: 작업 로그
         log_box = QGroupBox("작업 로그")
         lv = QVBoxLayout(log_box)
-        self.log_view = QPlainTextEdit(); self.log_view.setReadOnly(True)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
         self.btn_log_save = QPushButton("로그 저장")
-        lv.addWidget(self.log_view); lv.addWidget(self.btn_log_save, alignment=Qt.AlignmentFlag.AlignRight)
+        lv.addWidget(self.log_view)
+        lv.addWidget(self.btn_log_save, alignment=Qt.AlignmentFlag.AlignRight)
 
         root = QVBoxLayout(self)
         root.addWidget(conn)
@@ -204,15 +238,19 @@ class RobotUI(QWidget):
     def _make_pos_table(self, title, cols, unit):
         """열 = 축, 행 = [현재값, 작업 시작 대비 변화량]"""
         box = QWidget()
-        v = QVBoxLayout(box); v.setContentsMargins(0, 0, 0, 0)
-        cap = QLabel(title); cap.setStyleSheet("font-weight: bold;")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        cap = QLabel(title)
+        cap.setStyleSheet("font-weight: bold;")
         v.addWidget(cap)
 
         t = QTableWidget(2, len(cols))
         t.setHorizontalHeaderLabels(cols)
         t.setVerticalHeaderLabels([unit, "변화량"])
         t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        t.horizontalHeader().setStyleSheet("QHeaderView::section { font-weight: bold; padding: 4px; }")
+        t.horizontalHeader().setStyleSheet(
+            "QHeaderView::section { font-weight: bold; padding: 4px; }"
+        )
         t.verticalHeader().setDefaultSectionSize(38)
         t.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         t.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -221,9 +259,13 @@ class RobotUI(QWidget):
         t.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         t.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        big = QFont("Consolas"); big.setStyleHint(QFont.StyleHint.Monospace)
-        big.setPointSize(14); big.setBold(True)
-        small = QFont("Consolas"); small.setStyleHint(QFont.StyleHint.Monospace); small.setPointSize(10)
+        big = QFont("Consolas")
+        big.setStyleHint(QFont.StyleHint.Monospace)
+        big.setPointSize(14)
+        big.setBold(True)
+        small = QFont("Consolas")
+        small.setStyleHint(QFont.StyleHint.Monospace)
+        small.setPointSize(10)
         for r in range(2):
             for c in range(len(cols)):
                 it = QTableWidgetItem("-")
@@ -286,7 +328,9 @@ class RobotUI(QWidget):
     def set_task_state(self, state):
         self.task_state.setText(STATE_TEXT[state])
         self.task_state.setStyleSheet(
-            f"background:{STATE_COLOR[state]}; color:white; font: bold 16px; padding:8px; border-radius:6px;")
+            f"background:{STATE_COLOR[state]}; color:white; font: bold 16px; "
+            "padding:8px; border-radius:6px;"
+        )
 
     def update_buttons(self):
         robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
@@ -317,7 +361,8 @@ class RobotUI(QWidget):
                 self.set_conn_label(self.mb_status, False, "● 연결 실패")
                 self.log(f"Modbus 연결 실패: {ip}:{port}")
         self.mb_btn.setText("해제" if self.mb_ok else "연결")
-        self.mb_ip.setEnabled(not self.mb_ok); self.mb_port.setEnabled(not self.mb_ok)
+        self.mb_ip.setEnabled(not self.mb_ok)
+        self.mb_port.setEnabled(not self.mb_ok)
         self.update_buttons()
 
     def write_regs(self, index, values):
@@ -376,14 +421,16 @@ class RobotUI(QWidget):
     def on_robot_connected(self):
         self.set_conn_label(self.rb_status, True)
         self.rb_btn.setText("해제")
-        self.rb_ip.setEnabled(False); self.rb_port.setEnabled(False)
+        self.rb_ip.setEnabled(False)
+        self.rb_port.setEnabled(False)
         self.log("로봇 연결됨")
         self.update_buttons()
 
     def on_robot_disconnected(self):
         self.set_conn_label(self.rb_status, False)
         self.rb_btn.setText("연결")
-        self.rb_ip.setEnabled(True); self.rb_port.setEnabled(True)
+        self.rb_ip.setEnabled(True)
+        self.rb_port.setEnabled(True)
         self.log("로봇 연결 해제")
         if self.busy:
             self.finish_task(False, "작업 중 로봇 연결 끊김")
