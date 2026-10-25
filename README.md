@@ -100,14 +100,23 @@ git push -u origin fix/내작업
 src/robot_comm/modbus_client.py   PC → Modbus 서버 클라이언트
 src/robot_comm/sim_server.py      로봇 없이 테스트하는 가짜 Modbus 서버
 src/vision/detect.py              OpenCV 색상 기반 물체 중심 검출
-ui/quiz3_gui.py                   퀴즈3 PyQt UI
+quizzes/quiz3/                    퀴즈3: Modbus 서버 + UI + 공용 레지스터 맵 (자세한 내용은 폴더 README)
 drl/                              로봇에 올리는 DRL 코드(.drl) — CI는 문법만 검사
 tests/                            pytest 테스트
 .github/workflows/ci.yml          PR / main push마다 lint + 테스트
 .github/workflows/release.yml     v* 태그 push 시 테스트 후 zip을 GitHub Release로 배포
 ```
 
-퀴즈는 1~5단계까지 있으며, 퀴즈별 폴더(`quizzes/quiz1` ~ `quiz5`)로 정리할 예정입니다.
+퀴즈는 1~5단계까지 있으며, 퀴즈별로 `quizzes/quizN/` 폴더에 정리합니다.
+여러 퀴즈가 같이 쓰는 코드는 퀴즈 폴더에 복사하지 말고 `src/`에 둡니다.
+
+| 퀴즈 | 폴더 | 상태 |
+|---|---|---|
+| 1 | - | 수업 진행 (DRL Pick & Place) |
+| 2 | - | 수업 진행 (DRL 높이 측정 + CSV) |
+| 3 | `quizzes/quiz3/` | Modbus 서버 + UI |
+| 4 | - | 예정 |
+| 5 | - | 예정 |
 
 ## 개발 환경 (Windows)
 
@@ -131,10 +140,12 @@ set PYTHONPATH=src
 python -m robot_comm.sim_server --port 5020
 ```
 
-퀴즈3 UI:
+퀴즈3 (서버 → UI 순서, 자세한 내용은 `quizzes/quiz3/README.md`):
 
 ```bat
-python ui\quiz3_gui.py
+cd quizzes\quiz3
+python quiz3_server.py --reset
+python quiz3_ui.py
 ```
 
 ## CI/CD
