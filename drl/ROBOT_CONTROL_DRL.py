@@ -166,8 +166,6 @@ def TASK1():
     task1_pick_place(T1_HOME_1, T1_PICK_UP_1, T1_PLACE_UP_1)
     task1_pick_place(T1_HOME_2, T1_PICK_UP_2, T1_PLACE_UP_2)
 
-    move_l(T1_HOME_1, 100, 80)
-
 
 # Task 2: Height Measurement - Alignment - Pick and Place
 def height_measurement(job_id, p_up):
@@ -245,6 +243,8 @@ def TASK2():
         grip_off()
         move_jx(PLACE_UP[slot])
 
+    movej(HOME, v=VJ, a=AJ)
+
     return True
 
 
@@ -275,7 +275,7 @@ while True:
         if ok:
             send_msg("DONE,2")
         else:
-            send_msg("TASK 2 Failed")
+            send_msg("Task 2 Failed")
 
     elif cmd == "END":
         send_msg("END Received")
