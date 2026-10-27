@@ -158,7 +158,7 @@ def task1_pick_place(home, pick, place):
 
     move_l_REL(Z_UP_PLACE, VEL, ACC)
 
-    move_j(home, VEL, ACC)
+    move_l(home, VEL, ACC)
 
 def TASK1():
     gripper_open()
