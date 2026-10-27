@@ -42,8 +42,8 @@ from PyQt6.QtWidgets import (
 )
 
 # ========================= 설정 =========================
-DEFAULT_MB_IP, DEFAULT_MB_PORT = "127.0.0.1", 502
-DEFAULT_ROBOT_IP, DEFAULT_ROBOT_PORT = "127.0.0.1", 9000
+DEFAULT_MB_IP, DEFAULT_MB_PORT = "127.0.0.1", 5020     # 이 PC에서 연 Modbus 서버
+DEFAULT_ROBOT_IP, DEFAULT_ROBOT_PORT = "192.168.137.100", 9000  # 로봇 DRL 소켓
 
 UNIT_ID = 1
 HR_START = 0          # Modbus 시작 주소 (0-based)
@@ -53,11 +53,12 @@ TASK_TIMEOUT_MS = 60_000
 
 # 레지스터 맵 (모두 0-based Modbus 주소)
 #   0~9   : 작업 1~10의 성공적인 완료 횟수
-#   10~19 : 현재 작업 2 실행의 측정 1~10번 Z축 높이 (x10, signed)
+#   10~19 : 작업 2 측정 Z축 높이 1~10번 (x10, signed), 실행마다 이어서 3칸씩 기록
 TASK_COUNT_START = 0
 TASK_COUNT_SIZE = 10
 TASK2_Z_START = 10
 TASK2_Z_SIZE = 10
+TASK2_MEAS_COUNT = 3  # 작업 2 1회 실행의 측정 개수
 SCALE = 10            # Z축 높이의 0.1 단위 표현용
 
 REG_NAMES = {}
@@ -111,6 +112,7 @@ class RobotUI(QWidget):
         self.rx_buf = ""
         self.busy = False
         self.current_task = 0
+        self.task2_base = 0    # 이번 작업 2 실행이 기록할 첫 Z 칸 (0 = 주소 10)
         self.csv_header_set = False
 
         self._build_ui()
@@ -488,7 +490,7 @@ class RobotUI(QWidget):
                     raise ValueError
                 job_id = int(cells[0])
                 measured_z = float(cells[4])
-                if not 1 <= job_id <= TASK2_Z_SIZE:
+                if not 1 <= job_id <= TASK2_MEAS_COUNT:
                     raise ValueError
             except ValueError:
                 self.log(f"DATA 형식 오류: {line}")
@@ -496,7 +498,7 @@ class RobotUI(QWidget):
 
             if self.busy and self.current_task == 2:
                 self.append_csv_row(cells)
-                address = TASK2_Z_START + job_id - 1
+                address = TASK2_Z_START + self.task2_base + job_id - 1
                 self.write_regs(address, [to_reg(measured_z)])
             else:
                 self.log(f"작업 2 외 DATA 수신: {line}")
@@ -529,9 +531,37 @@ class RobotUI(QWidget):
             self.log(f"로봇 수신: {line}")
 
     # ---------------- 작업 실행 ----------------
+    def next_task2_slot(self):
+        """마지막으로 기록된 Z 칸의 다음 칸 번호. 3칸이 남지 않았거나 읽기 실패면 None."""
+        if not self.mb_ok:
+            self.log("Modbus 미연결: 작업 2 측정값을 기록할 수 없습니다.")
+            return None
+        try:
+            rr = mb_call(self.mb.read_holding_registers, HR_START + TASK2_Z_START,
+                         count=TASK2_Z_SIZE)
+        except Exception as e:
+            self.log(f"측정 칸 읽기 예외: {e}")
+            return None
+        if rr.isError():
+            self.log(f"측정 칸 읽기 오류: {rr}")
+            return None
+        used = [i for i, raw in enumerate(rr.registers) if raw != 0]
+        base = used[-1] + 1 if used else 0
+        if base + TASK2_MEAS_COUNT > TASK2_Z_SIZE:
+            self.log(f"작업 2 측정 칸 부족 (남은 칸 {TASK2_Z_SIZE - base}개 / "
+                     f"필요 {TASK2_MEAS_COUNT}개): 서버 초기화 필요")
+            return None
+        return base
+
     def start_task(self, n):
         if self.busy:
             return
+        if n == 2:
+            # 로봇을 움직이기 전에 측정값 3개를 기록할 칸이 있는지 확인한다.
+            base = self.next_task2_slot()
+            if base is None:
+                return
+            self.task2_base = base
         self.busy = True
         self.current_task = n
         self.update_buttons()
@@ -540,8 +570,8 @@ class RobotUI(QWidget):
         if n == 2:
             self.clear_csv()
             self.append_csv_row(["job_id", "x", "y", "approach_z", "measured_z"])
-            # 이전 실행의 남은 Z값이 보이지 않도록 새 실행 시 초기화한다.
-            self.write_regs(TASK2_Z_START, [0] * TASK2_Z_SIZE)
+            self.log(f"작업 2 측정값 기록 위치: 주소 {TASK2_Z_START + self.task2_base}~"
+                     f"{TASK2_Z_START + self.task2_base + TASK2_MEAS_COUNT - 1}")
 
         # 변화량 기준점 = 작업 시작 시점 위치
         self.base_xyz, self.base_joint = self.prev_xyz, self.prev_joint
