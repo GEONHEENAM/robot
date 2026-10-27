@@ -1,6 +1,6 @@
 """
 협동로봇 작업 UI (PyQt6)
- - Modbus TCP Client  : pymodbus  → 서버(HR 1~20) 쓰기/읽기
+ - Modbus TCP Client  : pymodbus  → 서버 주소 0~19 쓰기/읽기
  - Robot TCP Client   : QTcpSocket → 작업 명령 / 완료·좌표·CSV 수신
 
 설치: pip install PyQt6 pymodbus
@@ -8,8 +8,9 @@
 [로봇 통신 프로토콜 - 예시, 실제 로봇 프로그램에 맞게 수정]
   UI → 로봇 : "TASK,1\n" / "TASK,2\n"
   로봇 → UI : "POS,x,y,z,j1,j2,j3,j4,j5,j6\n"   현재 좌표/관절값
-              "CSV,v1,v2,...\n"                  작업2 CSV 한 줄 (첫 줄이 문자면 헤더)
-              "DONE,1\n"                         작업 완료
+              "DATA,id,x,y,approach_z,measured_z\n" 작업2 측정 결과
+              "CSV,v1,v2,...\n"                    일반 CSV 한 줄
+              "DONE,1\n"                           작업 완료
               "ERROR,메시지\n"                    작업 오류
 """
 
@@ -41,31 +42,30 @@ from PyQt6.QtWidgets import (
 )
 
 # ========================= 설정 =========================
-DEFAULT_MB_IP, DEFAULT_MB_PORT = "127.0.0.1", 502
-DEFAULT_ROBOT_IP, DEFAULT_ROBOT_PORT = "127.0.0.1", 9000
+DEFAULT_MB_IP, DEFAULT_MB_PORT = "127.0.0.1", 5020     # 이 PC에서 연 Modbus 서버
+DEFAULT_ROBOT_IP, DEFAULT_ROBOT_PORT = "192.168.137.100", 9000  # 로봇 DRL 소켓
 
 UNIT_ID = 1
-HR_START = 0          # HR1 = 주소 0 (0-based). 서버가 1-based면 1로 변경
+HR_START = 0          # Modbus 시작 주소 (0-based)
 HR_COUNT = 20
 POLL_MS = 500         # 레지스터 조회 주기
 TASK_TIMEOUT_MS = 60_000
 
-# 레지스터 맵 (index 0 = HR1) - 서버 담당자와 맞춰서 수정
-REG_TASK = 0          # HR1      : 작업 번호
-REG_STATE = 1         # HR2      : 상태 (0 대기 / 1 작업 중 / 2 완료 / 3 오류)
-REG_XYZ = 2           # HR3~5    : X, Y, Z   (x10, signed)
-REG_JOINT = 5         # HR6~11   : J1~J6     (x10, signed)
-SCALE = 10            # 0.1 단위 표현용
+# 레지스터 맵 (모두 0-based Modbus 주소)
+#   0~9   : 작업 1~10의 성공적인 완료 횟수
+#   10~19 : 작업 2 측정 Z축 높이 1~10번 (x10, signed), 실행마다 이어서 3칸씩 기록
+TASK_COUNT_START = 0
+TASK_COUNT_SIZE = 10
+TASK2_Z_START = 10
+TASK2_Z_SIZE = 10
+TASK2_MEAS_COUNT = 3  # 작업 2 1회 실행의 측정 개수
+SCALE = 10            # Z축 높이의 0.1 단위 표현용
 
-# True  : 로봇 소켓으로 받은 POS를 UI가 서버 HR에 기록
-# False : 서버가 두산 로봇 값을 직접 HR에 채움 → UI는 읽기만 (덮어쓰기 방지)
-WRITE_POS_TO_SERVER = True
-
-REG_NAMES = {REG_TASK: "작업 번호", REG_STATE: "상태"}
-for i, n in enumerate("XYZ"):
-    REG_NAMES[REG_XYZ + i] = f"{n} (x10)"
-for i in range(6):
-    REG_NAMES[REG_JOINT + i] = f"J{i + 1} (x10)"
+REG_NAMES = {}
+for i in range(TASK_COUNT_SIZE):
+    REG_NAMES[TASK_COUNT_START + i] = f"작업 {i + 1} 완료 횟수"
+for i in range(TASK2_Z_SIZE):
+    REG_NAMES[TASK2_Z_START + i] = f"작업 2 Z 높이 #{i + 1} (x10)"
 
 STATE_IDLE, STATE_BUSY, STATE_DONE, STATE_ERROR = 0, 1, 2, 3
 STATE_TEXT = {STATE_IDLE: "대기", STATE_BUSY: "작업 중", STATE_DONE: "완료", STATE_ERROR: "오류"}
@@ -108,9 +108,11 @@ class RobotUI(QWidget):
         self.mb: ModbusTcpClient | None = None
         self.mb_ok = False
         self.robot = QTcpSocket(self)
+        self.robot_ready = False
         self.rx_buf = ""
         self.busy = False
         self.current_task = 0
+        self.task2_base = 0    # 이번 작업 2 실행이 기록할 첫 Z 칸 (0 = 주소 10)
         self.csv_header_set = False
 
         self._build_ui()
@@ -175,8 +177,8 @@ class RobotUI(QWidget):
         h.addWidget(QLabel("상태:"))
         h.addWidget(self.task_state)
 
-        # 3) 로봇 위치 표 (서버 레지스터 재조회 값, 0.1 단위)
-        pos = QGroupBox("로봇 위치 (서버 레지스터 기준)")
+        # 3) 로봇 TCP에서 POS로 받은 현재 위치
+        pos = QGroupBox("로봇 위치 (TCP POS 수신 기준)")
         ph = QHBoxLayout(pos)
         tcp_box, self.tcp_table = self._make_pos_table("TCP 좌표", ["X", "Y", "Z"], "위치 [mm]")
         jnt_box, self.joint_table = self._make_pos_table(
@@ -185,16 +187,16 @@ class RobotUI(QWidget):
         ph.addWidget(tcp_box, 3)
         ph.addWidget(jnt_box, 6)
         self.base_xyz = self.base_joint = None     # 작업 시작 시점 값 (변화량 기준)
-        self.prev_xyz = self.prev_joint = None     # 직전 조회 값 (변경 강조용)
+        self.prev_xyz = self.prev_joint = None     # 직전 POS 수신 값 (변경 강조용)
 
         # 4) 작업 결과 1: 레지스터 모니터
         self.reg_table = QTableWidget(HR_COUNT, 4)
-        self.reg_table.setHorizontalHeaderLabels(["HR", "항목", "Raw", "값"])
+        self.reg_table.setHorizontalHeaderLabels(["주소", "항목", "Raw", "값"])
         self.reg_table.verticalHeader().setVisible(False)
         self.reg_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.reg_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         for i in range(HR_COUNT):
-            self.reg_table.setItem(i, 0, QTableWidgetItem(str(HR_START + i + 1)))
+            self.reg_table.setItem(i, 0, QTableWidgetItem(str(HR_START + i)))
             self.reg_table.setItem(i, 1, QTableWidgetItem(REG_NAMES.get(i, "-")))
             self.reg_table.setItem(i, 2, QTableWidgetItem("-"))
             self.reg_table.setItem(i, 3, QTableWidgetItem("-"))
@@ -334,7 +336,7 @@ class RobotUI(QWidget):
 
     def update_buttons(self):
         robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
-        enable = self.mb_ok and robot_ok and not self.busy   # 작업 중에는 둘 다 비활성화
+        enable = self.mb_ok and robot_ok and self.robot_ready and not self.busy
         self.btn_task1.setEnabled(enable)
         self.btn_task2.setEnabled(enable)
         self.mb_btn.setEnabled(not self.busy)
@@ -371,12 +373,32 @@ class RobotUI(QWidget):
         try:
             rr = mb_call(self.mb.write_registers, HR_START + index, list(values))
             if rr.isError():
-                self.log(f"레지스터 쓰기 오류 (HR{HR_START + index + 1}): {rr}")
+                self.log(f"레지스터 쓰기 오류 (주소 {HR_START + index}): {rr}")
                 return False
             return True
         except Exception as e:
             self.log(f"레지스터 쓰기 예외: {e}")
             return False
+
+    def increment_task_count(self, task_number):
+        """작업 N의 완료 횟수를 주소 N-1에 1 증가시킨다."""
+        if not 1 <= task_number <= TASK_COUNT_SIZE:
+            self.log(f"완료 횟수 기록 범위 초과: 작업 {task_number}")
+            return False
+        address = TASK_COUNT_START + task_number - 1
+        try:
+            rr = mb_call(self.mb.read_holding_registers, HR_START + address, count=1)
+            if rr.isError():
+                self.log(f"완료 횟수 읽기 오류 (주소 {address}): {rr}")
+                return False
+            count = rr.registers[0]
+        except Exception as e:
+            self.log(f"완료 횟수 읽기 예외: {e}")
+            return False
+        if count >= 0xFFFF:
+            self.log(f"작업 {task_number} 완료 횟수가 최대치입니다.")
+            return False
+        return self.write_regs(address, [count + 1])
 
     def poll_registers(self):
         if not self.mb_ok:
@@ -395,18 +417,10 @@ class RobotUI(QWidget):
 
         for i, raw in enumerate(regs):
             self.reg_table.item(i, 2).setText(str(raw))
-            if REG_XYZ <= i < REG_JOINT + 6:
+            if TASK2_Z_START <= i < TASK2_Z_START + TASK2_Z_SIZE:
                 self.reg_table.item(i, 3).setText(f"{from_reg(raw):.1f}")
-            elif i == REG_STATE:
-                self.reg_table.item(i, 3).setText(STATE_TEXT.get(raw, "?"))
             else:
                 self.reg_table.item(i, 3).setText(str(raw))
-
-        xyz = [from_reg(regs[REG_XYZ + k]) for k in range(3)]
-        joint = [from_reg(regs[REG_JOINT + k]) for k in range(6)]
-        self._update_pos_table(self.tcp_table, xyz, self.prev_xyz, self.base_xyz)
-        self._update_pos_table(self.joint_table, joint, self.prev_joint, self.base_joint)
-        self.prev_xyz, self.prev_joint = xyz, joint
 
     # ---------------- Robot socket ----------------
     def toggle_robot(self):
@@ -419,7 +433,8 @@ class RobotUI(QWidget):
             self.robot.disconnectFromHost()
 
     def on_robot_connected(self):
-        self.set_conn_label(self.rb_status, True)
+        self.robot_ready = False
+        self.set_conn_label(self.rb_status, True, "● READY 대기")
         self.rb_btn.setText("해제")
         self.rb_ip.setEnabled(False)
         self.rb_port.setEnabled(False)
@@ -427,6 +442,7 @@ class RobotUI(QWidget):
         self.update_buttons()
 
     def on_robot_disconnected(self):
+        self.robot_ready = False
         self.set_conn_label(self.rb_status, False)
         self.rb_btn.setText("연결")
         self.rb_ip.setEnabled(True)
@@ -462,27 +478,90 @@ class RobotUI(QWidget):
             except ValueError:
                 self.log(f"POS 형식 오류: {line}")
                 return
-            # 결과 기록: X,Y,Z,J1~J6 → HR3~11, 이후 재조회
-            # (서버가 두산 로봇에서 직접 값을 받아오면 WRITE_POS_TO_SERVER = False)
-            if WRITE_POS_TO_SERVER and self.write_regs(REG_XYZ, [to_reg(v) for v in vals[:9]]):
-                self.poll_registers()
+            xyz, joint = vals[:3], vals[3:9]
+            self._update_pos_table(self.tcp_table, xyz, self.prev_xyz, self.base_xyz)
+            self._update_pos_table(self.joint_table, joint, self.prev_joint, self.base_joint)
+            self.prev_xyz, self.prev_joint = xyz, joint
+
+        elif cmd == "DATA":
+            cells = [cell.strip() for cell in body.split(",")]
+            try:
+                if len(cells) != 5:
+                    raise ValueError
+                job_id = int(cells[0])
+                measured_z = float(cells[4])
+                if not 1 <= job_id <= TASK2_MEAS_COUNT:
+                    raise ValueError
+            except ValueError:
+                self.log(f"DATA 형식 오류: {line}")
+                return
+
+            if self.busy and self.current_task == 2:
+                self.append_csv_row(cells)
+                address = TASK2_Z_START + self.task2_base + job_id - 1
+                self.write_regs(address, [to_reg(measured_z)])
+            else:
+                self.log(f"작업 2 외 DATA 수신: {line}")
 
         elif cmd == "CSV":
             self.append_csv_row(body.split(","))
 
         elif cmd == "DONE":
+            try:
+                done_task = int(body.strip())
+            except ValueError:
+                self.log(f"DONE 형식 오류: {line}")
+                return
+            if done_task != self.current_task:
+                self.log(f"DONE 작업 번호 불일치: {line}")
+                return
             self.finish_task(True)
 
         elif cmd == "ERROR":
             self.finish_task(False, body or "로봇 오류")
 
+        elif cmd == "READY":
+            if not self.robot_ready:
+                self.robot_ready = True
+                self.set_conn_label(self.rb_status, True, "● 연결됨 / READY")
+                self.log("로봇 READY 수신")
+                self.update_buttons()
+
         else:
             self.log(f"로봇 수신: {line}")
 
     # ---------------- 작업 실행 ----------------
+    def next_task2_slot(self):
+        """마지막으로 기록된 Z 칸의 다음 칸 번호. 3칸이 남지 않았거나 읽기 실패면 None."""
+        if not self.mb_ok:
+            self.log("Modbus 미연결: 작업 2 측정값을 기록할 수 없습니다.")
+            return None
+        try:
+            rr = mb_call(self.mb.read_holding_registers, HR_START + TASK2_Z_START,
+                         count=TASK2_Z_SIZE)
+        except Exception as e:
+            self.log(f"측정 칸 읽기 예외: {e}")
+            return None
+        if rr.isError():
+            self.log(f"측정 칸 읽기 오류: {rr}")
+            return None
+        used = [i for i, raw in enumerate(rr.registers) if raw != 0]
+        base = used[-1] + 1 if used else 0
+        if base + TASK2_MEAS_COUNT > TASK2_Z_SIZE:
+            self.log(f"작업 2 측정 칸 부족 (남은 칸 {TASK2_Z_SIZE - base}개 / "
+                     f"필요 {TASK2_MEAS_COUNT}개): 서버 초기화 필요")
+            return None
+        return base
+
     def start_task(self, n):
         if self.busy:
             return
+        if n == 2:
+            # 로봇을 움직이기 전에 측정값 3개를 기록할 칸이 있는지 확인한다.
+            base = self.next_task2_slot()
+            if base is None:
+                return
+            self.task2_base = base
         self.busy = True
         self.current_task = n
         self.update_buttons()
@@ -490,12 +569,13 @@ class RobotUI(QWidget):
 
         if n == 2:
             self.clear_csv()
+            self.append_csv_row(["job_id", "x", "y", "approach_z", "measured_z"])
+            self.log(f"작업 2 측정값 기록 위치: 주소 {TASK2_Z_START + self.task2_base}~"
+                     f"{TASK2_Z_START + self.task2_base + TASK2_MEAS_COUNT - 1}")
 
         # 변화량 기준점 = 작업 시작 시점 위치
         self.base_xyz, self.base_joint = self.prev_xyz, self.prev_joint
 
-        # 작업 요청 기록: HR1 = 작업 번호, HR2 = 작업 중
-        self.write_regs(REG_TASK, [n, STATE_BUSY])
         self.robot.write(f"TASK,{n}\n".encode())
         self.robot.flush()
         self.task_timer.start(TASK_TIMEOUT_MS)
@@ -506,8 +586,9 @@ class RobotUI(QWidget):
             return
         self.task_timer.stop()
         state = STATE_DONE if ok else STATE_ERROR
-        self.write_regs(REG_STATE, [state])   # 결과 기록
-        self.poll_registers()                  # 서버 값 재조회
+        if ok:
+            self.increment_task_count(self.current_task)
+            self.poll_registers()
         self.set_task_state(state)
         self.log(f"작업 {self.current_task} {'완료' if ok else '오류: ' + reason}")
         self.busy = False
