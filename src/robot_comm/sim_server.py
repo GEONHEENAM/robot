@@ -29,7 +29,7 @@ def build_context(size: int = 100, device_id: int = 1) -> SimDevice:
 class SimServerThread:
     """별도 스레드에서 asyncio 이벤트 루프로 서버를 돌린다(테스트용)."""
 
-    def __init__(self, host: str = "192.168.0.0", port: int = 502, size: int = 100) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 5020, size: int = 100) -> None:
         self.host, self.port, self.size = host, port, size
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: ModbusTcpServer | None = None
