@@ -101,6 +101,7 @@ src/robot_comm/modbus_client.py   PC → Modbus 서버 클라이언트
 src/robot_comm/sim_server.py      로봇 없이 테스트하는 가짜 Modbus 서버
 src/vision/detect.py              OpenCV 색상 기반 물체 중심 검출
 ui/quiz3_gui.py                   퀴즈3 PyQt UI
+quizzes/quiz3/                    퀴즈3 Modbus 서버 + 확인 도구 + 레지스터 맵 (폴더 README 참고)
 drl/                              로봇에 올리는 DRL 코드(.drl) — CI는 문법만 검사
 tests/                            pytest 테스트
 .github/workflows/ci.yml          PR / main push마다 lint + 테스트
@@ -124,7 +125,14 @@ pip install -r requirements.txt -r requirements-dev.txt
 
 ## 실행
 
-로봇 없이 Modbus 서버 띄우기:
+퀴즈3 Modbus 서버 (자세한 내용은 `quizzes/quiz3/README.md`):
+
+```bat
+cd quizzes\quiz3
+python quiz3_server.py --reset
+```
+
+CI 테스트용 가짜 Modbus 서버 (퀴즈3 서버 아님, 저장 기능 없음):
 
 ```bat
 set PYTHONPATH=src

@@ -6,3 +6,9 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+
+# 실행 중 생성되는 데이터 (퀴즈3)
+quiz3_registers.json
+quiz3_registers.tmp
+quiz3_registers.bad
+task2_height_result.csv
