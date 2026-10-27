@@ -46,6 +46,15 @@ def send_msg(msg):
 
     return res
 
+def send_pos(tcp = None):
+    """현재 TCP X/Y/Z와 J1~J6을 GUI의 POS 프로토콜로 전송한다."""
+    if tcp is None:
+        tcp, _ = get_current_posx(DR_BASE)
+    joint = get_current_posj()
+    send_msg("POS,{0:.3f},{1:.3f},{2:.3f},{3:.3f},{4:.3f},{5:.3f},{6:.3f},{7:.3f},{8:.3f}".format(
+        tcp[0], tcp[1], tcp[2],
+        joint[0], joint[1], joint[2], joint[3], joint[4], joint[5]))
+
 def read_line():
     global rx_buf
     while True:
@@ -82,21 +91,25 @@ def move_jx(pos, v = VJ, a = AJ):
     send_msg("MoveJ Start")
     movejx(pos, v, a, sol=SOL)
     send_msg("MoveJ Done")
+    send_pos()
 
 def move_j(pos, v = VJ, a = AJ):
     send_msg("MoveJ Start")
     movej(pos, v, a)
     send_msg("MoveJ Done")
+    send_pos()
 
 def move_l(pos, v = VL, a = AL):
     send_msg("MoveL Start")
     movel(pos, v, a)
     send_msg("MoveL Done")
+    send_pos()
 
 def move_l_REL(dist, v = VL, a = AL):
     send_msg("MoveL_REL Start")
     movel(dist, mod=DR_MV_MOD_REL, v=v, a=a)
     send_msg("MoveL_REL Done")
+    send_pos()
 
 def grip_on():
     send_msg("Gripper ON")
@@ -129,7 +142,7 @@ VEL, ACC = 60, 60
 
 def task1_pick_place(home, pick, place):
     send_msg("Return HOME")
-    movel(home, 100, 80)
+    move_l(home, 100, 80)
 
     move_j(pick, VEL, ACC)
     move_l_REL(Z_DN, VEL, ACC)
@@ -153,7 +166,7 @@ def TASK1():
     task1_pick_place(T1_HOME_1, T1_PICK_UP_1, T1_PLACE_UP_1)
     task1_pick_place(T1_HOME_2, T1_PICK_UP_2, T1_PLACE_UP_2)
 
-    movel(T1_HOME_1, 100, 80)
+    move_l(T1_HOME_1, 100, 80)
 
 
 # Task 2: Height Measurement - Alignment - Pick and Place
@@ -180,6 +193,7 @@ def height_measurement(job_id, p_up):
 
     cur, _ = get_current_posx(DR_BASE)
     contact_z = cur[2]
+    send_pos(cur)
 
     release_force()
     release_compliance_ctrl()
@@ -241,6 +255,7 @@ SOL = get_current_solution_space()
 
 wait_client()
 send_msg("READY")
+send_pos()
 
 while True:
     cmd = read_line()
@@ -252,13 +267,13 @@ while True:
     if cmd == "TASK,1":
         send_msg("TASK 1 Accepted")
         TASK1()
-        send_msg("TASK 1 Finished")
+        send_msg("DONE,1")
 
     elif cmd == "TASK,2":
         send_msg("TASK 2 Accepted")
         ok = TASK2()
         if ok:
-            send_msg("TASK 2 Finished")
+            send_msg("DONE,2")
         else:
             send_msg("TASK 2 Failed")
 
