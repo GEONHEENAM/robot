@@ -17,9 +17,11 @@
 import csv
 import datetime
 import sys
+import time
+from pathlib import Path
 
 from pymodbus.client import ModbusTcpClient
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QProcess, Qt, QTimer
 from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtNetwork import QAbstractSocket, QTcpSocket
 from PyQt6.QtWidgets import (
@@ -50,6 +52,7 @@ HR_START = 0          # Modbus 시작 주소 (0-based)
 HR_COUNT = 20
 POLL_MS = 500         # 레지스터 조회 주기
 TASK_TIMEOUT_MS = 60_000
+VISION_CONFIRM_FRAMES = 5
 
 # 레지스터 맵 (모두 0-based Modbus 주소)
 #   0~9   : 작업 1~10의 성공적인 완료 횟수
@@ -111,6 +114,13 @@ class RobotUI(QWidget):
         self.robot_ready = False
         self.rx_buf = ""
         self.busy = False
+        self.vision_process = QProcess(self)
+        self.vision_rx_buf = ""
+        self.vision_detection = "None"
+        self.vision_frame_count = 0
+        self.vision_blocked_color = None
+        self.vision_release_count = 0
+        self.vision_started_at = 0.0
         self.current_task = 0
         self.task2_base = 0    # 이번 작업 2 실행이 기록할 첫 Z 칸 (0 = 주소 10)
         self.csv_header_set = False
@@ -167,13 +177,15 @@ class RobotUI(QWidget):
         h = QHBoxLayout(task)
         self.btn_task1 = QPushButton("작업 1")
         self.btn_task2 = QPushButton("작업 2")
-        for b in (self.btn_task1, self.btn_task2):
+        self.btn_vision = QPushButton("Vision")
+        for b in (self.btn_task1, self.btn_task2, self.btn_vision):
             b.setMinimumHeight(48)
         self.task_state = QLabel()
         self.task_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.task_state.setMinimumWidth(160)
         h.addWidget(self.btn_task1)
         h.addWidget(self.btn_task2)
+        h.addWidget(self.btn_vision)
         h.addWidget(QLabel("상태:"))
         h.addWidget(self.task_state)
 
@@ -307,6 +319,7 @@ class RobotUI(QWidget):
         self.rb_btn.clicked.connect(self.toggle_robot)
         self.btn_task1.clicked.connect(lambda: self.start_task(1))
         self.btn_task2.clicked.connect(lambda: self.start_task(2))
+        self.btn_vision.clicked.connect(self.start_vision)
         self.btn_csv_load.clicked.connect(self.load_csv)
         self.btn_csv_save.clicked.connect(self.save_csv)
         self.btn_csv_clear.clicked.connect(self.clear_csv)
@@ -316,6 +329,11 @@ class RobotUI(QWidget):
         self.robot.disconnected.connect(self.on_robot_disconnected)
         self.robot.readyRead.connect(self.on_robot_ready_read)
         self.robot.errorOccurred.connect(self.on_robot_error)
+        self.vision_process.started.connect(self.on_vision_started)
+        self.vision_process.readyReadStandardOutput.connect(self.on_vision_output)
+        self.vision_process.readyReadStandardError.connect(self.on_vision_error_output)
+        self.vision_process.finished.connect(self.on_vision_finished)
+        self.vision_process.errorOccurred.connect(self.on_vision_error)
 
     # ---------------- 공통 ----------------
     def log(self, msg):
@@ -336,11 +354,142 @@ class RobotUI(QWidget):
 
     def update_buttons(self):
         robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
-        enable = self.mb_ok and robot_ok and self.robot_ready and not self.busy
+        ready = self.mb_ok and robot_ok and self.robot_ready
+        vision_stopped = self.vision_process.state() == QProcess.ProcessState.NotRunning
+        enable = ready and not self.busy
         self.btn_task1.setEnabled(enable)
         self.btn_task2.setEnabled(enable)
+        self.btn_vision.setEnabled(ready and vision_stopped)
         self.mb_btn.setEnabled(not self.busy)
         self.rb_btn.setEnabled(not self.busy)
+
+    # ---------------- Vision ----------------
+    def start_vision(self):
+        if self.vision_process.state() != QProcess.ProcessState.NotRunning:
+            return
+
+        project_root = Path(__file__).resolve().parents[1]
+        detect_script = project_root / "src" / "vision" / "detect.py"
+        if not detect_script.is_file():
+            self.log(f"Vision 실행 파일을 찾을 수 없습니다: {detect_script}")
+            return
+
+        self.vision_process.setWorkingDirectory(str(project_root))
+        self.vision_process.setProgram(sys.executable)
+        self.vision_process.setArguments([str(detect_script)])
+        self.vision_rx_buf = ""
+        self.vision_detection = "None"
+        self.vision_frame_count = 0
+        self.vision_blocked_color = None
+        self.vision_release_count = 0
+        self.vision_started_at = time.perf_counter()
+        self.vision_process.start()
+        self.update_buttons()
+
+    def on_vision_started(self):
+        self.log("Vision 실행: 카메라 준비 중")
+        self.update_buttons()
+
+    def on_vision_output(self):
+        data = bytes(self.vision_process.readAllStandardOutput()).decode(errors="replace")
+        self.vision_rx_buf += data
+        while "\n" in self.vision_rx_buf:
+            line, self.vision_rx_buf = self.vision_rx_buf.split("\n", 1)
+            self.handle_vision_line(line.strip())
+
+    def handle_vision_line(self, line):
+        if not line:
+            return
+        command, _, value = line.partition(",")
+
+        if command == "VISION_READY":
+            try:
+                backend, open_text, first_frame_text = value.split(",")
+                open_seconds = float(open_text)
+                first_frame_seconds = float(first_frame_text)
+            except ValueError:
+                self.log(f"Vision 준비 응답 형식 오류: {line}")
+                return
+            total_seconds = time.perf_counter() - self.vision_started_at
+            self.log(
+                f"Vision 준비 완료 ({backend}): 전체 {total_seconds:.2f}초, "
+                f"카메라 열기 {open_seconds:.2f}초, 첫 프레임 {first_frame_seconds:.2f}초"
+            )
+            return
+
+        if command == "VISION_ERROR":
+            self.log(f"Vision 오류: {value}")
+            return
+
+        if command != "DETECTION":
+            return
+
+        # 직전 작업을 일으킨 색상은 연속 5프레임 동안 보이지 않아야 잠금을 해제한다.
+        if self.vision_blocked_color is not None:
+            if value == self.vision_blocked_color:
+                self.vision_release_count = 0
+            else:
+                self.vision_release_count += 1
+                if self.vision_release_count >= VISION_CONFIRM_FRAMES:
+                    self.log(f"{self.vision_blocked_color} 제거 확인: 재검출 허용")
+                    self.vision_blocked_color = None
+                    self.vision_release_count = 0
+
+            if self.vision_blocked_color is not None:
+                self.vision_detection = "None"
+                self.vision_frame_count = 0
+                return
+
+        # 작업 중에는 새 색상의 프레임 수를 쌓지 않는다.
+        if self.busy:
+            self.vision_detection = "None"
+            self.vision_frame_count = 0
+            return
+
+        if value not in ("Red", "Blue"):
+            self.vision_detection = "None"
+            self.vision_frame_count = 0
+            return
+
+        if value == self.vision_detection:
+            self.vision_frame_count += 1
+        else:
+            self.vision_detection = value
+            self.vision_frame_count = 1
+
+        self.log(f"Vision 감지: {value} ({self.vision_frame_count}/{VISION_CONFIRM_FRAMES})")
+        if self.vision_frame_count >= VISION_CONFIRM_FRAMES:
+            task_number = 1 if value == "Red" else 2
+            self.vision_blocked_color = value
+            self.vision_release_count = 0
+            self.vision_detection = "None"
+            self.vision_frame_count = 0
+
+            robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
+            if not (self.mb_ok and robot_ok and self.robot_ready):
+                self.log(f"{value} 확정, 연결 준비가 되지 않아 작업 {task_number} 실행 안 함")
+                return
+
+            self.log(f"{value} 확정: Vision을 유지하고 작업 {task_number} 실행")
+            self.start_task(task_number)
+
+    def on_vision_error_output(self):
+        data = bytes(self.vision_process.readAllStandardError()).decode(errors="replace").strip()
+        if data:
+            self.log(f"Vision 진단: {data}")
+
+    def on_vision_finished(self, exit_code, _exit_status):
+        self.on_vision_output()
+        self.vision_detection = "None"
+        self.vision_frame_count = 0
+        self.vision_blocked_color = None
+        self.vision_release_count = 0
+        self.log(f"Vision 종료 (코드: {exit_code})")
+        self.update_buttons()
+
+    def on_vision_error(self, _error):
+        self.log(f"Vision 실행 오류: {self.vision_process.errorString()}")
+        self.update_buttons()
 
     # ---------------- Modbus ----------------
     def toggle_modbus(self):
@@ -661,6 +810,11 @@ class RobotUI(QWidget):
     # ---------------- 종료 ----------------
     def closeEvent(self, e):
         self.poll_timer.stop()
+        if self.vision_process.state() != QProcess.ProcessState.NotRunning:
+            self.vision_process.terminate()
+            if not self.vision_process.waitForFinished(1500):
+                self.vision_process.kill()
+                self.vision_process.waitForFinished(1000)
         if self.mb:
             self.mb.close()
         self.robot.abort()
