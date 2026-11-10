@@ -87,35 +87,28 @@ def gripper_open():
     set_tool_digital_output(2)
     wait(0.5)
     
-# 퀴즈1 메시지 규칙: 실행 직전 "MoveJ Start"/"MoveL Start", 실제 이동 완료 후 "MoveJ 종료"/"MoveL 종료"
-# 대소문자·공백을 문제지 표와 똑같이 유지한다. 상대이동(REL)도 MoveL 메시지를 쓴다.
-MSG_MOVEJ_START = "MoveJ Start"
-MSG_MOVEJ_END = "MoveJ 종료"
-MSG_MOVEL_START = "MoveL Start"
-MSG_MOVEL_END = "MoveL 종료"
-
 def move_jx(pos, v = VJ, a = AJ):
-    send_msg(MSG_MOVEJ_START)
+    send_msg("MoveJ Start")
     movejx(pos, v, a, sol=SOL)
-    send_msg(MSG_MOVEJ_END)
+    send_msg("MoveJ Done")
     send_pos()
 
 def move_j(pos, v = VJ, a = AJ):
-    send_msg(MSG_MOVEJ_START)
+    send_msg("MoveJ Start")
     movej(pos, v, a)
-    send_msg(MSG_MOVEJ_END)
+    send_msg("MoveJ Done")
     send_pos()
 
 def move_l(pos, v = VL, a = AL):
-    send_msg(MSG_MOVEL_START)
+    send_msg("MoveL Start")
     movel(pos, v, a)
-    send_msg(MSG_MOVEL_END)
+    send_msg("MoveL Done")
     send_pos()
 
 def move_l_REL(dist, v = VL, a = AL):
-    send_msg(MSG_MOVEL_START)
+    send_msg("MoveL_REL Start")
     movel(dist, mod=DR_MV_MOD_REL, v=v, a=a)
-    send_msg(MSG_MOVEL_END)
+    send_msg("MoveL_REL Done")
     send_pos()
 
 def grip_on():
@@ -239,10 +232,10 @@ def TASK2():
         p_up = MEAS_UP[job_id - 1]
         grip_z = max(h, MIN_DEPTH)
         place_z = grip_z + PLACE_MARGIN
+
+        # [메시지 전용] 퀴즈2 CSV용 작업 정보. 아래 이동 명령과 같은 목표점을 계산해 보내기만 한다.
         pick_t = with_z(p_up, grip_z)
         place_t = with_z(PLACE_UP[slot], place_z)
-
-        # 퀴즈2: 작업 번호 + 길이 + Pick/Place 목표점(각 X,Y,Z,Rx,Ry,Rz)을 먼저 보낸다
         send_msg("JOB,{0},{1:.2f},{2:.2f},{3:.2f},{4:.2f},{5:.2f},{6:.2f},{7:.2f},"
                  "{8:.2f},{9:.2f},{10:.2f},{11:.2f},{12:.2f},{13:.2f}".format(
                      job_id, h,
@@ -250,16 +243,16 @@ def TASK2():
                      place_t[0], place_t[1], place_t[2], place_t[3], place_t[4], place_t[5]))
 
         grip_off()
-        move_jx(p_up)                       # 이 작업의 첫 MoveJ Start = PC 시작 시각
-        move_l(pick_t, v=VL_DOWN)
+        move_jx(p_up)
+        move_l(with_z(p_up, grip_z), v=VL_DOWN)
         grip_on()
         move_l(p_up)
         move_jx(PLACE_UP[slot])
-        move_l(place_t, v=VL_DOWN)
+        move_l(with_z(PLACE_UP[slot], place_z), v=VL_DOWN)
         grip_off()
-        move_l(PLACE_UP[slot])              # 수직 상승. 마지막 MoveL 종료 = PC 종료 시각
+        move_jx(PLACE_UP[slot])
 
-        send_msg("JOB_DONE,{0}".format(job_id))
+        send_msg("JOB_DONE,{0}".format(job_id))     # [메시지 전용] 이 물체 이송 정상 종료
 
     movej(HOME, v=VJ, a=AJ)
 
@@ -277,7 +270,7 @@ def TaskRand1():
         movej(posj(0, 0, 0, -30, 0, 0), v=VJ, a=AJ, mod=DR_MV_MOD_REL)
 
     movej(HOME, v=VJ, a=AJ)
-
+    
 
 # Main: server open - wait for order - action
 movej(HOME, v=VJ, a=AJ)
