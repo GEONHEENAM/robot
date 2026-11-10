@@ -55,6 +55,7 @@ from vision.detect import (  # noqa: E402
     CAMERA_INDEX,
     find_largest_red_or_blue,
 )
+from vision.gesture_logic import GESTURE_TO_TASK, AutoTaskGate  # noqa: E402
 
 # ========================= 설정 =========================
 DEFAULT_MB_IP, DEFAULT_MB_PORT = "127.0.0.1", 5020     # 이 PC에서 연 Modbus 서버
@@ -66,6 +67,8 @@ HR_COUNT = 20
 POLL_MS = 500         # 레지스터 조회 주기
 TASK_TIMEOUT_MS = 60_000
 VISION_CONFIRM_FRAMES = 5
+GESTURE_HOLD_SEC = 1.0      # 같은 제스처를 이 시간 동안 유지해야 작업 실행
+GESTURE_RELEASE_SEC = 1.0   # 실행 후 손을 내린 상태가 이 시간 이어져야 다음 실행 허용
 
 # 레지스터 맵 (모두 0-based Modbus 주소)
 #   0~9   : 작업 1~10의 성공적인 완료 횟수
@@ -205,6 +208,81 @@ class VisionThread(QThread):
             camera.release()
 
 
+# ========================= Gesture 스레드 (MediaPipe) =========================
+class GestureThread(QThread):
+    """카메라 + MediaPipe 손 스켈레톤 검출을 UI 스레드 밖에서 수행한다.
+
+    판정 결과(label)만 UI로 보내고, 작업 실행 여부는 UI 스레드의
+    AutoTaskGate가 결정한다(작업 중 여부 busy를 UI가 갖고 있으므로).
+    """
+
+    frame_ready = pyqtSignal(QImage)
+    label_ready = pyqtSignal(object)          # str 또는 None(손 없음)
+    camera_ready = pyqtSignal(str, float, float)
+    gesture_error = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop_requested = threading.Event()
+        self.status_text = ""                 # UI가 써 주는 진행 상태 (영상에 표시)
+
+    def stop(self):
+        self._stop_requested.set()
+
+    def run(self):
+        # mediapipe import가 무거워서 버튼을 누를 때 이 스레드에서 불러온다
+        try:
+            from vision.gesture import MIRROR, HandGestureDetector, draw_overlay, open_camera
+        except Exception as error:  # mediapipe/cv2 import 실패
+            self.gesture_error.emit(f"Gesture 모듈 로드 실패: {error}")
+            return
+
+        started = time.perf_counter()
+        try:
+            detector = HandGestureDetector()
+        except Exception as error:
+            self.gesture_error.emit(str(error))
+            return
+        try:
+            camera = open_camera()
+        except RuntimeError as error:
+            detector.close()
+            self.gesture_error.emit(str(error))
+            return
+        open_seconds = time.perf_counter() - started
+
+        first_frame = True
+        try:
+            while not self._stop_requested.is_set():
+                read_started = time.perf_counter()
+                ok, frame = camera.read()
+                if not ok:
+                    raise RuntimeError("카메라 프레임을 읽을 수 없습니다.")
+                if MIRROR:
+                    frame = cv2.flip(frame, 1)
+                result = detector.detect(frame)
+                if first_frame:
+                    self.camera_ready.emit(
+                        "MediaPipe", open_seconds, time.perf_counter() - read_started
+                    )
+                    first_frame = False
+
+                self.label_ready.emit(result.label)
+                draw_overlay(frame, result, detector.connections, self.status_text)
+
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                height, width, channels = rgb.shape
+                image = QImage(
+                    rgb.data, width, height, channels * width, QImage.Format.Format_RGB888
+                ).copy()
+                self.frame_ready.emit(image)
+        except Exception as error:   # 카메라·추론 오류 모두 화면에 표시하고 종료
+            self.gesture_error.emit(str(error))
+        finally:
+            camera.release()
+            detector.close()
+
+
 # ========================= 메인 UI =========================
 class RobotUI(QWidget):
     def __init__(self):
@@ -226,6 +304,10 @@ class RobotUI(QWidget):
         self.vision_blocked_color = None
         self.vision_release_count = 0
         self.vision_started_at = 0.0
+        self.gesture_thread: GestureThread | None = None
+        self.gesture_gate = AutoTaskGate(GESTURE_HOLD_SEC, GESTURE_RELEASE_SEC)
+        self.gesture_error_message: str | None = None
+        self.gesture_last_label = "init"
         self.current_task = 0
         self.task2_base = 0    # 이번 작업 2 실행이 기록할 첫 Z 칸 (0 = 주소 10)
         self.csv_header_set = False
@@ -283,7 +365,9 @@ class RobotUI(QWidget):
         self.btn_task1 = QPushButton("작업 1")
         self.btn_task2 = QPushButton("작업 2")
         self.btn_vision = QPushButton("Vision 시작")
-        for b in (self.btn_task1, self.btn_task2, self.btn_vision):
+        self.btn_gesture = QPushButton("Gesture 시작")
+        self.btn_gesture.setToolTip("MediaPipe 손 제스처: 검지 1개 → 작업 1, 검지+중지 → 작업 2")
+        for b in (self.btn_task1, self.btn_task2, self.btn_vision, self.btn_gesture):
             b.setMinimumHeight(48)
         self.task_state = QLabel()
         self.task_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -291,6 +375,7 @@ class RobotUI(QWidget):
         h.addWidget(self.btn_task1)
         h.addWidget(self.btn_task2)
         h.addWidget(self.btn_vision)
+        h.addWidget(self.btn_gesture)
         h.addWidget(QLabel("상태:"))
         h.addWidget(self.task_state)
 
@@ -443,6 +528,7 @@ class RobotUI(QWidget):
         self.btn_task1.clicked.connect(lambda: self.start_task(1))
         self.btn_task2.clicked.connect(lambda: self.start_task(2))
         self.btn_vision.clicked.connect(self.start_vision)
+        self.btn_gesture.clicked.connect(self.toggle_gesture)
         self.btn_csv_load.clicked.connect(self.load_csv)
         self.btn_csv_save.clicked.connect(self.save_csv)
         self.btn_csv_clear.clicked.connect(self.clear_csv)
@@ -473,10 +559,15 @@ class RobotUI(QWidget):
     def update_buttons(self):
         robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
         ready = self.mb_ok and robot_ok and self.robot_ready
-        enable = ready and not self.busy
+        vision_on = self.vision_thread is not None
+        gesture_on = self.gesture_thread is not None
+        # 자동 모드(Vision/Gesture) 실행 중에는 수동 작업 버튼을 막는다
+        enable = ready and not self.busy and not vision_on and not gesture_on
         self.btn_task1.setEnabled(enable)
         self.btn_task2.setEnabled(enable)
-        self.btn_vision.setEnabled(True)
+        # 카메라는 하나: Vision과 Gesture는 동시에 실행하지 않는다
+        self.btn_vision.setEnabled(not gesture_on)
+        self.btn_gesture.setEnabled(not vision_on)
         self.mb_btn.setEnabled(not self.busy)
         self.rb_btn.setEnabled(not self.busy)
 
@@ -505,6 +596,7 @@ class RobotUI(QWidget):
         self.vision_thread.vision_error.connect(self.on_vision_error)
         self.vision_thread.finished.connect(self.on_vision_finished)
         self.vision_thread.start()
+        self.update_buttons()
 
     def stop_vision(self):
         if self.vision_thread is not None and self.vision_thread.isRunning():
@@ -614,6 +706,98 @@ class RobotUI(QWidget):
         self.log(f"Vision 오류: {message}")
         self.vision_status.setText("오류")
         self.vision_status.setStyleSheet("font-weight:bold; color:#dc2626;")
+
+    # ---------------- Gesture (MediaPipe) ----------------
+    def toggle_gesture(self):
+        if self.gesture_thread is not None:
+            if self.gesture_thread.isRunning():
+                self.vision_status.setText("Gesture 종료 중…")
+                self.gesture_thread.stop()     # 진행 중 작업은 그대로 완료 절차를 따른다
+            return
+        if self.vision_thread is not None:
+            self.log("Vision 실행 중에는 Gesture를 시작할 수 없습니다.")
+            return
+
+        self.gesture_error_message = None
+        self.gesture_gate.reset()
+        self.gesture_last_label = "init"
+        self.log("Gesture 실행: 모델·카메라 준비 중 (첫 실행은 수 초 걸릴 수 있음)")
+        self.vision_status.setText("Gesture 준비 중…")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#d97706;")
+        self.btn_gesture.setText("Gesture 정지")
+
+        self.gesture_thread = GestureThread(self)
+        self.gesture_thread.frame_ready.connect(self.on_vision_frame)
+        self.gesture_thread.label_ready.connect(self.handle_gesture_label)
+        self.gesture_thread.camera_ready.connect(self.on_gesture_ready)
+        self.gesture_thread.gesture_error.connect(self.on_gesture_error)
+        self.gesture_thread.finished.connect(self.on_gesture_finished)
+        self.gesture_thread.start()
+        self.update_buttons()
+
+    def on_gesture_ready(self, backend, open_seconds, first_frame_seconds):
+        self.log(
+            f"Gesture 준비 완료 ({backend}): 모델·카메라 {open_seconds:.2f}초, "
+            f"첫 추론 {first_frame_seconds:.2f}초"
+        )
+
+    def handle_gesture_label(self, label):
+        now = time.monotonic()
+        task_number = self.gesture_gate.update(label, now, self.busy)
+
+        # 영상 위·상태줄 표시
+        if self.busy:
+            status = "작업 중"
+        elif self.gesture_gate.locked:
+            status = "손을 내리면 다음 실행"
+        elif label in GESTURE_TO_TASK:
+            status = f"유지 {self.gesture_gate.progress(now) * 100:.0f}%"
+        else:
+            status = "대기"
+        if self.gesture_thread is not None:
+            self.gesture_thread.status_text = status
+        shown = label or "손 없음"
+        color = {"ONE": "#dc2626", "TWO": "#2563eb"}.get(label, "#16a34a")
+        self.vision_status.setText(f"Gesture · {shown} · {status}")
+        self.vision_status.setStyleSheet(f"font-weight:bold; color:{color};")
+
+        if label != self.gesture_last_label:      # 바뀔 때만 로그 (프레임마다 쓰면 로그가 넘침)
+            self.log(f"Gesture 판정: {shown}")
+            self.gesture_last_label = label
+
+        if task_number is None:
+            return
+        robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
+        if not (self.mb_ok and robot_ok and self.robot_ready):
+            self.log(f"{label} 확정, 연결 준비가 되지 않아 작업 {task_number} 실행 안 함")
+            return
+        self.log(f"{label} 제스처 확정: 작업 {task_number} 실행")
+        self.start_task(task_number)
+
+    def on_gesture_error(self, message):
+        self.gesture_error_message = message
+        self.log(f"Gesture 오류: {message}")
+        self.vision_status.setText("Gesture 오류")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#dc2626;")
+
+    def on_gesture_finished(self):
+        if self.gesture_thread is not None:
+            self.gesture_thread.deleteLater()
+        self.gesture_thread = None
+        self.gesture_gate.reset()
+        self.vision_pixmap = None
+        self.vision_view.clear()
+        if self.gesture_error_message:
+            self.vision_view.setText(self.gesture_error_message)
+            self.vision_status.setText("Gesture 오류")
+            self.vision_status.setStyleSheet("font-weight:bold; color:#dc2626;")
+        else:
+            self.vision_view.setText("Vision 또는 Gesture를 시작하면 카메라 영상이 표시됩니다.")
+            self.vision_status.setText("정지")
+            self.vision_status.setStyleSheet("font-weight:bold; color:#6b7280;")
+        self.btn_gesture.setText("Gesture 시작")
+        self.log("Gesture 종료")
+        self.update_buttons()
 
     # ---------------- Modbus ----------------
     def toggle_modbus(self):
@@ -942,6 +1126,12 @@ class RobotUI(QWidget):
             self.vision_thread.stop()
             if not self.vision_thread.wait(3000):
                 self.log("Vision 종료를 기다리는 중입니다. 잠시 후 다시 닫아 주세요.")
+                e.ignore()
+                return
+        if self.gesture_thread is not None and self.gesture_thread.isRunning():
+            self.gesture_thread.stop()
+            if not self.gesture_thread.wait(3000):
+                self.log("Gesture 종료를 기다리는 중입니다. 잠시 후 다시 닫아 주세요.")
                 e.ignore()
                 return
         if self.mb:
