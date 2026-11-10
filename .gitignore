@@ -17,3 +17,6 @@ task2_height_result.csv
 # MediaPipe 모델 (tools/download_hand_model.py 로 받음)
 models/*.task
 models/*.part
+
+# 퀴즈2 작업 결과 CSV 예전 형식 보관본
+task2_height_result_old_*.csv

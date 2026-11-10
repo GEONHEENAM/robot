@@ -239,16 +239,27 @@ def TASK2():
         p_up = MEAS_UP[job_id - 1]
         grip_z = max(h, MIN_DEPTH)
         place_z = grip_z + PLACE_MARGIN
+        pick_t = with_z(p_up, grip_z)
+        place_t = with_z(PLACE_UP[slot], place_z)
+
+        # 퀴즈2: 작업 번호 + 길이 + Pick/Place 목표점(각 X,Y,Z,Rx,Ry,Rz)을 먼저 보낸다
+        send_msg("JOB,{0},{1:.2f},{2:.2f},{3:.2f},{4:.2f},{5:.2f},{6:.2f},{7:.2f},"
+                 "{8:.2f},{9:.2f},{10:.2f},{11:.2f},{12:.2f},{13:.2f}".format(
+                     job_id, h,
+                     pick_t[0], pick_t[1], pick_t[2], pick_t[3], pick_t[4], pick_t[5],
+                     place_t[0], place_t[1], place_t[2], place_t[3], place_t[4], place_t[5]))
 
         grip_off()
-        move_jx(p_up)
-        move_l(with_z(p_up, grip_z), v=VL_DOWN)
+        move_jx(p_up)                       # 이 작업의 첫 MoveJ Start = PC 시작 시각
+        move_l(pick_t, v=VL_DOWN)
         grip_on()
         move_l(p_up)
         move_jx(PLACE_UP[slot])
-        move_l(with_z(PLACE_UP[slot], place_z), v=VL_DOWN)
+        move_l(place_t, v=VL_DOWN)
         grip_off()
-        move_jx(PLACE_UP[slot])
+        move_l(PLACE_UP[slot])              # 수직 상승. 마지막 MoveL 종료 = PC 종료 시각
+
+        send_msg("JOB_DONE,{0}".format(job_id))
 
     movej(HOME, v=VJ, a=AJ)
 

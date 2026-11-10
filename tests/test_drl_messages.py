@@ -77,6 +77,24 @@ def test_motion_function_sends_start_and_end(func_name):
     assert start_i < motion_i < end_i
 
 
+def test_task2_job_messages_wrap_pick_place():
+    """작업2 이송 루프: JOB 송신 → 모션 → 수직 상승(move_l) → JOB_DONE 송신 순서.
+
+    PC는 마지막 'MoveL 종료'를 종료 시각으로 쓰므로, 놓은 뒤 상승은 move_l 이어야 한다.
+    """
+    task2 = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == "TASK2")
+    loops = [n for n in ast.walk(task2) if isinstance(n, ast.For)]
+    pick_loop = next(lp for lp in loops if "JOB_DONE" in ast.unparse(lp))
+    calls = [_call_name(s) for s in pick_loop.body if _call_name(s)]
+    texts = [ast.unparse(s) for s in pick_loop.body if _call_name(s)]
+
+    job_i = next(i for i, t in enumerate(texts) if "'JOB," in t or '"JOB,' in t)
+    first_motion = next(i for i, c in enumerate(calls) if c in ("move_jx", "move_j", "move_l"))
+    assert job_i < first_motion, "JOB은 첫 모션보다 먼저 보내야 함"
+    assert "JOB_DONE" in texts[-1], "JOB_DONE이 루프 마지막이어야 함"
+    assert calls[-2] == "move_l", "JOB_DONE 직전 동작(놓은 뒤 상승)은 move_l 이어야 함"
+
+
 def test_no_nonstandard_motion_messages():
     """문제지에 없는 모션 메시지(Done, MoveL_REL 등)를 보내지 않는다."""
     for bad in ('"MoveJ Done"', '"MoveL Done"', '"MoveL_REL Start"', '"MoveL_REL Done"'):
