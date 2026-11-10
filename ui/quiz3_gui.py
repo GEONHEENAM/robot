@@ -390,7 +390,9 @@ class RobotUI(QWidget):
         self.btn_task2 = QPushButton("작업 2")
         self.btn_vision = QPushButton("Vision 시작")
         self.btn_gesture = QPushButton("Gesture 시작")
-        self.btn_gesture.setToolTip("MediaPipe 손 제스처: 검지 1개 → 작업 1, 검지+중지 → 작업 2")
+        self.btn_gesture.setToolTip(
+            "MediaPipe 손 제스처: 검지 1개 → 작업 1, 검지+중지 → 작업 2, 손 2개 → TaskRandom1"
+        )
         for b in (self.btn_task1, self.btn_task2, self.btn_vision, self.btn_gesture):
             b.setMinimumHeight(48)
         self.task_state = QLabel()
@@ -805,7 +807,9 @@ class RobotUI(QWidget):
         if self.gesture_thread is not None:
             self.gesture_thread.status_text = status
         shown = label or "손 없음"
-        color = {"ONE": "#dc2626", "TWO": "#2563eb"}.get(label, "#16a34a")
+        color = {"ONE": "#dc2626", "TWO": "#2563eb", "MULTI": "#d97706"}.get(
+            label, "#16a34a"
+        )
         self.vision_status.setText(f"Gesture · {shown} · {status}")
         self.vision_status.setStyleSheet(f"font-weight:bold; color:{color};")
 
@@ -816,11 +820,15 @@ class RobotUI(QWidget):
         if task_number is None:
             return
         robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
+        task_name = "TaskRandom1" if task_number == 3 else f"작업 {task_number}"
         if not (self.mb_ok and robot_ok and self.robot_ready):
-            self.log(f"{label} 확정, 연결 준비가 되지 않아 작업 {task_number} 실행 안 함")
+            self.log(f"{label} 확정, 연결 준비가 되지 않아 {task_name} 실행 안 함")
             return
-        self.log(f"{label} 제스처 확정: 작업 {task_number} 실행")
-        self.start_task(task_number)
+        self.log(f"{label} 제스처 확정: {task_name} 실행")
+        if task_number == 3:
+            self.start_task(3, command="R1")
+        else:
+            self.start_task(task_number)
 
     def on_gesture_error(self, message):
         self.gesture_error_message = message

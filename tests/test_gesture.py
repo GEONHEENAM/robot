@@ -92,7 +92,13 @@ def test_gate_switching_gesture_restarts_hold():
     assert fired == []
 
 
-@pytest.mark.parametrize("label", [None, UNKNOWN, MULTI, FIST, OPEN])
+def test_gate_multi_triggers_random_task():
+    gate = AutoTaskGate(hold_sec=1.0, release_sec=1.0)
+    fired, _ = _feed(gate, [MULTI] * 40)
+    assert fired == [3]
+
+
+@pytest.mark.parametrize("label", [None, UNKNOWN, FIST, OPEN])
 def test_gate_ignores_non_action(label):
     gate = AutoTaskGate(hold_sec=1.0, release_sec=1.0)
     fired, _ = _feed(gate, [label] * 40)
