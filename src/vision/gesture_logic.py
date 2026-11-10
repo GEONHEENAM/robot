@@ -9,7 +9,7 @@ MediaPipe를 import하지 않는다. 카메라·모델 없이 pytest로 검증�
     FIST  네 손가락 모두 접음   → 실행 없음
     OPEN  네 손가락 모두 폄     → 실행 없음
     UNKNOWN  판정 불확실(애매한 손가락, 낮은 신뢰도) → 실행 없음
-    MULTI    손이 2개 이상      → 실행 보류
+    MULTI    손이 2개 이상      → 랜덤 동작 TaskRandom1
     None     손 미검출          → 실행 없음
 """
 
@@ -39,7 +39,7 @@ MIN_HAND_SCORE = 0.7      # handedness 신뢰도 하한
 ONE, TWO, FIST, OPEN = "ONE", "TWO", "FIST", "OPEN"
 UNKNOWN, MULTI = "UNKNOWN", "MULTI"
 
-GESTURE_TO_TASK = {ONE: 1, TWO: 2}
+GESTURE_TO_TASK = {ONE: 1, TWO: 2, MULTI: 3}
 
 Point = tuple[float, float]
 

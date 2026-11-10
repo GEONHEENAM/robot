@@ -127,7 +127,7 @@ def draw_overlay(frame: np.ndarray, result: GestureResult,
     top = result.label or "No hand"
     task = GESTURE_TO_TASK.get(result.label or "")
     if task:
-        top += f" -> TASK {task}"
+        top += " -> TASK R1" if task == 3 else f" -> TASK {task}"
     if status:
         top += f" | {status}"
     cv2.putText(frame, top, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
