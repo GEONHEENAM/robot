@@ -17,12 +17,14 @@
 import csv
 import datetime
 import sys
+import threading
 import time
 from pathlib import Path
 
+import cv2
 from pymodbus.client import ModbusTcpClient
-from PyQt6.QtCore import QProcess, Qt, QTimer
-from PyQt6.QtGui import QBrush, QColor, QFont
+from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QFont, QImage, QPixmap
 from PyQt6.QtNetwork import QAbstractSocket, QTcpSocket
 from PyQt6.QtWidgets import (
     QApplication,
@@ -41,6 +43,17 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
     QWidget,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from vision.detect import (  # noqa: E402
+    CAMERA_BACKEND,
+    CAMERA_INDEX,
+    find_largest_red_or_blue,
 )
 
 # ========================= 설정 =========================
@@ -101,12 +114,103 @@ def mb_call(fn, *args, **kw):
         return fn(*args, slave=UNIT_ID, **kw)
 
 
+# ========================= Vision 스레드 =========================
+class VisionThread(QThread):
+    """카메라 캡처/검출을 UI 스레드 밖에서 수행한다."""
+
+    frame_ready = pyqtSignal(QImage)
+    detection_ready = pyqtSignal(str)
+    camera_ready = pyqtSignal(str, float, float)
+    vision_error = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop_requested = threading.Event()
+
+    def stop(self):
+        self._stop_requested.set()
+
+    def run(self):
+        open_started = time.perf_counter()
+        camera = cv2.VideoCapture(CAMERA_INDEX, CAMERA_BACKEND)
+        backend_name = "DirectShow" if CAMERA_BACKEND == cv2.CAP_DSHOW else "Default"
+        if not camera.isOpened() and CAMERA_BACKEND != cv2.CAP_ANY:
+            camera.release()
+            camera = cv2.VideoCapture(CAMERA_INDEX)
+            backend_name = "Default fallback"
+        open_seconds = time.perf_counter() - open_started
+
+        if not camera.isOpened():
+            camera.release()
+            self.vision_error.emit(f"카메라 {CAMERA_INDEX}번을 열 수 없습니다.")
+            return
+
+        first_frame = True
+        try:
+            while not self._stop_requested.is_set():
+                read_started = time.perf_counter()
+                ok, frame = camera.read()
+                if not ok:
+                    raise RuntimeError("카메라 프레임을 읽을 수 없습니다.")
+
+                if first_frame:
+                    first_read_seconds = time.perf_counter() - read_started
+                    self.camera_ready.emit(backend_name, open_seconds, first_read_seconds)
+                    first_frame = False
+
+                target = find_largest_red_or_blue(frame)
+                if target is None:
+                    detection = "None"
+                    status = "Target: not found"
+                    text_color = (0, 0, 255)
+                else:
+                    (cx, cy), detection = target
+                    cv2.drawMarker(
+                        frame,
+                        (cx, cy),
+                        (0, 255, 0),
+                        cv2.MARKER_CROSS,
+                        markerSize=24,
+                        thickness=2,
+                    )
+                    cv2.circle(frame, (cx, cy), 12, (0, 255, 0), 2)
+                    status = f"{detection}: ({cx}, {cy})"
+                    text_color = (0, 255, 0)
+
+                cv2.putText(
+                    frame,
+                    status,
+                    (16, 32),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    text_color,
+                    2,
+                    cv2.LINE_AA,
+                )
+                self.detection_ready.emit(detection)
+
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                height, width, channels = rgb.shape
+                image = QImage(
+                    rgb.data,
+                    width,
+                    height,
+                    channels * width,
+                    QImage.Format.Format_RGB888,
+                ).copy()
+                self.frame_ready.emit(image)
+        except RuntimeError as error:
+            self.vision_error.emit(str(error))
+        finally:
+            camera.release()
+
+
 # ========================= 메인 UI =========================
 class RobotUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("협동로봇 작업 UI")
-        self.resize(1000, 760)
+        self.resize(1200, 880)
 
         self.mb: ModbusTcpClient | None = None
         self.mb_ok = False
@@ -114,8 +218,9 @@ class RobotUI(QWidget):
         self.robot_ready = False
         self.rx_buf = ""
         self.busy = False
-        self.vision_process = QProcess(self)
-        self.vision_rx_buf = ""
+        self.vision_thread: VisionThread | None = None
+        self.vision_pixmap: QPixmap | None = None
+        self.vision_error_message: str | None = None
         self.vision_detection = "None"
         self.vision_frame_count = 0
         self.vision_blocked_color = None
@@ -177,7 +282,7 @@ class RobotUI(QWidget):
         h = QHBoxLayout(task)
         self.btn_task1 = QPushButton("작업 1")
         self.btn_task2 = QPushButton("작업 2")
-        self.btn_vision = QPushButton("Vision")
+        self.btn_vision = QPushButton("Vision 시작")
         for b in (self.btn_task1, self.btn_task2, self.btn_vision):
             b.setMinimumHeight(48)
         self.task_state = QLabel()
@@ -200,6 +305,24 @@ class RobotUI(QWidget):
         ph.addWidget(jnt_box, 6)
         self.base_xyz = self.base_joint = None     # 작업 시작 시점 값 (변화량 기준)
         self.prev_xyz = self.prev_joint = None     # 직전 POS 수신 값 (변경 강조용)
+
+        vision_box = QGroupBox("실시간 Vision")
+        vv = QVBoxLayout(vision_box)
+        self.vision_view = QLabel("Vision을 시작하면 카메라 영상이 표시됩니다.")
+        self.vision_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.vision_view.setMinimumSize(360, 240)
+        self.vision_view.setStyleSheet(
+            "background:#111827; color:#d1d5db; border:1px solid #374151;"
+        )
+        self.vision_status = QLabel("정지")
+        self.vision_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.vision_status.setStyleSheet("font-weight:bold; color:#6b7280;")
+        vv.addWidget(self.vision_view, 1)
+        vv.addWidget(self.vision_status)
+
+        monitor_row = QHBoxLayout()
+        monitor_row.addWidget(pos, 3)
+        monitor_row.addWidget(vision_box, 2)
 
         # 4) 작업 결과 1: 레지스터 모니터
         self.reg_table = QTableWidget(HR_COUNT, 4)
@@ -245,7 +368,7 @@ class RobotUI(QWidget):
         root = QVBoxLayout(self)
         root.addWidget(conn)
         root.addWidget(task)
-        root.addWidget(pos)
+        root.addLayout(monitor_row, 3)
         root.addWidget(tabs, 3)
         root.addWidget(log_box, 2)
 
@@ -329,11 +452,6 @@ class RobotUI(QWidget):
         self.robot.disconnected.connect(self.on_robot_disconnected)
         self.robot.readyRead.connect(self.on_robot_ready_read)
         self.robot.errorOccurred.connect(self.on_robot_error)
-        self.vision_process.started.connect(self.on_vision_started)
-        self.vision_process.readyReadStandardOutput.connect(self.on_vision_output)
-        self.vision_process.readyReadStandardError.connect(self.on_vision_error_output)
-        self.vision_process.finished.connect(self.on_vision_finished)
-        self.vision_process.errorOccurred.connect(self.on_vision_error)
 
     # ---------------- 공통 ----------------
     def log(self, msg):
@@ -355,74 +473,72 @@ class RobotUI(QWidget):
     def update_buttons(self):
         robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
         ready = self.mb_ok and robot_ok and self.robot_ready
-        vision_stopped = self.vision_process.state() == QProcess.ProcessState.NotRunning
         enable = ready and not self.busy
         self.btn_task1.setEnabled(enable)
         self.btn_task2.setEnabled(enable)
-        self.btn_vision.setEnabled(ready and vision_stopped)
+        self.btn_vision.setEnabled(True)
         self.mb_btn.setEnabled(not self.busy)
         self.rb_btn.setEnabled(not self.busy)
 
     # ---------------- Vision ----------------
     def start_vision(self):
-        if self.vision_process.state() != QProcess.ProcessState.NotRunning:
+        if self.vision_thread is not None:
+            if self.vision_thread.isRunning():
+                self.stop_vision()
             return
 
-        project_root = Path(__file__).resolve().parents[1]
-        detect_script = project_root / "src" / "vision" / "detect.py"
-        if not detect_script.is_file():
-            self.log(f"Vision 실행 파일을 찾을 수 없습니다: {detect_script}")
-            return
-
-        self.vision_process.setWorkingDirectory(str(project_root))
-        self.vision_process.setProgram(sys.executable)
-        self.vision_process.setArguments([str(detect_script)])
-        self.vision_rx_buf = ""
+        self.vision_error_message = None
         self.vision_detection = "None"
         self.vision_frame_count = 0
         self.vision_blocked_color = None
         self.vision_release_count = 0
         self.vision_started_at = time.perf_counter()
-        self.vision_process.start()
-        self.update_buttons()
-
-    def on_vision_started(self):
         self.log("Vision 실행: 카메라 준비 중")
-        self.update_buttons()
+        self.vision_status.setText("카메라 준비 중…")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#d97706;")
+        self.btn_vision.setText("Vision 정지")
 
-    def on_vision_output(self):
-        data = bytes(self.vision_process.readAllStandardOutput()).decode(errors="replace")
-        self.vision_rx_buf += data
-        while "\n" in self.vision_rx_buf:
-            line, self.vision_rx_buf = self.vision_rx_buf.split("\n", 1)
-            self.handle_vision_line(line.strip())
+        self.vision_thread = VisionThread(self)
+        self.vision_thread.frame_ready.connect(self.on_vision_frame)
+        self.vision_thread.detection_ready.connect(self.handle_vision_detection)
+        self.vision_thread.camera_ready.connect(self.on_vision_ready)
+        self.vision_thread.vision_error.connect(self.on_vision_error)
+        self.vision_thread.finished.connect(self.on_vision_finished)
+        self.vision_thread.start()
 
-    def handle_vision_line(self, line):
-        if not line:
+    def stop_vision(self):
+        if self.vision_thread is not None and self.vision_thread.isRunning():
+            self.vision_status.setText("종료 중…")
+            self.vision_thread.stop()
+
+    def on_vision_ready(self, backend, open_seconds, first_frame_seconds):
+        total_seconds = time.perf_counter() - self.vision_started_at
+        self.log(
+            f"Vision 준비 완료 ({backend}): 전체 {total_seconds:.2f}초, "
+            f"카메라 열기 {open_seconds:.2f}초, 첫 프레임 {first_frame_seconds:.2f}초"
+        )
+        self.vision_status.setText("실행 중 · 검출: None")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#16a34a;")
+
+    def on_vision_frame(self, image):
+        self.vision_pixmap = QPixmap.fromImage(image)
+        self._show_vision_pixmap()
+
+    def _show_vision_pixmap(self):
+        pixmap = getattr(self, "vision_pixmap", None)
+        if pixmap is None or not hasattr(self, "vision_view"):
             return
-        command, _, value = line.partition(",")
+        scaled = pixmap.scaled(
+            self.vision_view.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.vision_view.setPixmap(scaled)
 
-        if command == "VISION_READY":
-            try:
-                backend, open_text, first_frame_text = value.split(",")
-                open_seconds = float(open_text)
-                first_frame_seconds = float(first_frame_text)
-            except ValueError:
-                self.log(f"Vision 준비 응답 형식 오류: {line}")
-                return
-            total_seconds = time.perf_counter() - self.vision_started_at
-            self.log(
-                f"Vision 준비 완료 ({backend}): 전체 {total_seconds:.2f}초, "
-                f"카메라 열기 {open_seconds:.2f}초, 첫 프레임 {first_frame_seconds:.2f}초"
-            )
-            return
-
-        if command == "VISION_ERROR":
-            self.log(f"Vision 오류: {value}")
-            return
-
-        if command != "DETECTION":
-            return
+    def handle_vision_detection(self, value):
+        color = {"Red": "#dc2626", "Blue": "#2563eb"}.get(value, "#16a34a")
+        self.vision_status.setText(f"실행 중 · 검출: {value}")
+        self.vision_status.setStyleSheet(f"font-weight:bold; color:{color};")
 
         # 직전 작업을 일으킨 색상은 연속 5프레임 동안 보이지 않아야 잠금을 해제한다.
         if self.vision_blocked_color is not None:
@@ -473,23 +589,31 @@ class RobotUI(QWidget):
             self.log(f"{value} 확정: Vision을 유지하고 작업 {task_number} 실행")
             self.start_task(task_number)
 
-    def on_vision_error_output(self):
-        data = bytes(self.vision_process.readAllStandardError()).decode(errors="replace").strip()
-        if data:
-            self.log(f"Vision 진단: {data}")
-
-    def on_vision_finished(self, exit_code, _exit_status):
-        self.on_vision_output()
+    def on_vision_finished(self):
         self.vision_detection = "None"
         self.vision_frame_count = 0
         self.vision_blocked_color = None
         self.vision_release_count = 0
-        self.log(f"Vision 종료 (코드: {exit_code})")
+        self.vision_thread = None
+        self.vision_pixmap = None
+        self.vision_view.clear()
+        if self.vision_error_message:
+            self.vision_view.setText(self.vision_error_message)
+            self.vision_status.setText("오류")
+            self.vision_status.setStyleSheet("font-weight:bold; color:#dc2626;")
+        else:
+            self.vision_view.setText("Vision을 시작하면 카메라 영상이 표시됩니다.")
+            self.vision_status.setText("정지")
+            self.vision_status.setStyleSheet("font-weight:bold; color:#6b7280;")
+        self.btn_vision.setText("Vision 시작")
+        self.log("Vision 종료")
         self.update_buttons()
 
-    def on_vision_error(self, _error):
-        self.log(f"Vision 실행 오류: {self.vision_process.errorString()}")
-        self.update_buttons()
+    def on_vision_error(self, message):
+        self.vision_error_message = message
+        self.log(f"Vision 오류: {message}")
+        self.vision_status.setText("오류")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#dc2626;")
 
     # ---------------- Modbus ----------------
     def toggle_modbus(self):
@@ -808,13 +932,18 @@ class RobotUI(QWidget):
                 f.write(self.log_view.toPlainText())
 
     # ---------------- 종료 ----------------
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._show_vision_pixmap()
+
     def closeEvent(self, e):
         self.poll_timer.stop()
-        if self.vision_process.state() != QProcess.ProcessState.NotRunning:
-            self.vision_process.terminate()
-            if not self.vision_process.waitForFinished(1500):
-                self.vision_process.kill()
-                self.vision_process.waitForFinished(1000)
+        if self.vision_thread is not None and self.vision_thread.isRunning():
+            self.vision_thread.stop()
+            if not self.vision_thread.wait(3000):
+                self.log("Vision 종료를 기다리는 중입니다. 잠시 후 다시 닫아 주세요.")
+                e.ignore()
+                return
         if self.mb:
             self.mb.close()
         self.robot.abort()
