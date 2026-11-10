@@ -247,6 +247,19 @@ def TASK2():
 
     return True
 
+# Task Random 1: "Why?"
+
+def TaskRand1():
+    movej(HOME, v=VJ, a=AJ)
+
+    send_msg("Why??")
+
+    for i in range(2):
+        movej(posj(0, 0, 0, 30, 0, 0), v=VJ, a=AJ, mod=DR_MV_MOD_REL)
+        movej(posj(0, 0, 0, -30, 0, 0), v=VJ, a=AJ, mod=DR_MV_MOD_REL)
+
+    movej(HOME, v=VJ, a=AJ)
+
 
 # Main: server open - wait for order - action
 movej(HOME, v=VJ, a=AJ)
@@ -276,6 +289,11 @@ while True:
             send_msg("DONE,2")
         else:
             send_msg("Task 2 Failed")
+
+    elif cmd == "TASK,R1":
+        send_msg("TASK Rand 1 Accepted")
+        TaskRand1()
+        send_msg("DONE,3")
 
     elif cmd == "END":
         send_msg("END Received")

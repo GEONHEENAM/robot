@@ -6,16 +6,17 @@
 설치: pip install PyQt6 pymodbus
 
 [로봇 통신 프로토콜 - 예시, 실제 로봇 프로그램에 맞게 수정]
-  UI → 로봇 : "TASK,1\n" / "TASK,2\n"
+  UI → 로봇 : "TASK,1\n" / "TASK,2\n" / "TASK,R1\n"
   로봇 → UI : "POS,x,y,z,j1,j2,j3,j4,j5,j6\n"   현재 좌표/관절값
               "DATA,id,x,y,approach_z,measured_z\n" 작업2 측정 결과
               "CSV,v1,v2,...\n"                    일반 CSV 한 줄
-              "DONE,1\n"                           작업 완료
+              "DONE,n\n"                           작업 n 완료 (R1은 n=3)
               "ERROR,메시지\n"                    작업 오류
 """
 
 import csv
 import datetime
+import random
 import sys
 import threading
 import time
@@ -67,6 +68,7 @@ HR_COUNT = 20
 POLL_MS = 500         # 레지스터 조회 주기
 TASK_TIMEOUT_MS = 60_000
 VISION_CONFIRM_FRAMES = 5
+RANDOM_TASK_PROBABILITY = 0.20
 GESTURE_HOLD_SEC = 1.0      # 같은 제스처를 이 시간 동안 유지해야 작업 실행
 GESTURE_RELEASE_SEC = 1.0   # 실행 후 손을 내린 상태가 이 시간 이어져야 다음 실행 허용
 
@@ -667,7 +669,8 @@ class RobotUI(QWidget):
 
         self.log(f"Vision 감지: {value} ({self.vision_frame_count}/{VISION_CONFIRM_FRAMES})")
         if self.vision_frame_count >= VISION_CONFIRM_FRAMES:
-            task_number = 1 if value == "Red" else 2
+            normal_task_number = 1 if value == "Red" else 2
+            random_task_selected = random.random() < RANDOM_TASK_PROBABILITY
             self.vision_blocked_color = value
             self.vision_release_count = 0
             self.vision_detection = "None"
@@ -675,11 +678,34 @@ class RobotUI(QWidget):
 
             robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
             if not (self.mb_ok and robot_ok and self.robot_ready):
-                self.log(f"{value} 확정, 연결 준비가 되지 않아 작업 {task_number} 실행 안 함")
+                missing = []
+                if not self.mb_ok:
+                    missing.append("Modbus 미연결")
+                if not robot_ok:
+                    missing.append("로봇 소켓 미연결")
+                elif not self.robot_ready:
+                    missing.append("로봇 READY 미수신")
+                reason = ", ".join(missing)
+
+                if random_task_selected:
+                    self.log(
+                        f"{value} 확정: 랜덤 작업 R1 당첨(20%), "
+                        f"명령 전달 실패 ({reason})"
+                    )
+                else:
+                    self.log(
+                        f"{value} 확정: 작업 {normal_task_number} "
+                        f"명령 전달 실패 ({reason})"
+                    )
                 return
 
-            self.log(f"{value} 확정: Vision을 유지하고 작업 {task_number} 실행")
-            self.start_task(task_number)
+            if random_task_selected:
+                self.log(f"{value} 확정: 20% 확률로 랜덤 작업 R1 실행")
+                # 로봇에는 TASK,R1을 보내고 DONE,3은 작업 3 완료로 기록한다.
+                self.start_task(3, command="R1")
+            else:
+                self.log(f"{value} 확정: Vision을 유지하고 작업 {normal_task_number} 실행")
+                self.start_task(normal_task_number)
 
     def on_vision_finished(self):
         self.vision_detection = "None"
@@ -1010,7 +1036,7 @@ class RobotUI(QWidget):
             return None
         return base
 
-    def start_task(self, n):
+    def start_task(self, n, command=None):
         if self.busy:
             return
         if n == 2:
@@ -1033,10 +1059,11 @@ class RobotUI(QWidget):
         # 변화량 기준점 = 작업 시작 시점 위치
         self.base_xyz, self.base_joint = self.prev_xyz, self.prev_joint
 
-        self.robot.write(f"TASK,{n}\n".encode())
+        command = str(n) if command is None else command
+        self.robot.write(f"TASK,{command}\n".encode())
         self.robot.flush()
         self.task_timer.start(TASK_TIMEOUT_MS)
-        self.log(f"작업 {n} 시작")
+        self.log(f"작업 {n} 시작 (명령: TASK,{command})")
 
     def finish_task(self, ok, reason=""):
         if not self.busy:
