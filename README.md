@@ -100,6 +100,9 @@ git push -u origin fix/내작업
 src/robot_comm/modbus_client.py   PC → Modbus 서버 클라이언트
 src/robot_comm/sim_server.py      로봇 없이 테스트하는 가짜 Modbus 서버
 src/vision/detect.py              OpenCV 색상 기반 물체 중심 검출
+src/vision/gesture_logic.py       손 스켈레톤 → 제스처 판정, 제스처 → 작업 실행 판단 (MediaPipe 없이 테스트)
+src/vision/gesture.py             MediaPipe Hand Landmarker 검출·오버레이, 단독 미리보기
+tools/download_hand_model.py      MediaPipe 손 모델(models/hand_landmarker.task) 다운로드
 ui/quiz3_gui.py                   퀴즈3 PyQt UI
 drl/                              로봇에 올리는 DRL 코드(.drl) — CI는 문법만 검사
 tests/                            pytest 테스트
@@ -136,6 +139,27 @@ python -m robot_comm.sim_server --port 5020
 ```bat
 python ui\quiz3_gui.py
 ```
+
+### Gesture (MediaPipe 손 스켈레톤 → 로봇 작업)
+
+처음 한 번: opencv-python을 지우고 모델을 받는다 (mediapipe는 opencv-contrib-python에 의존, 둘이 같이 있으면 cv2가 꼬임).
+
+```bat
+pip uninstall -y opencv-python
+pip install -r requirements.txt
+python tools\download_hand_model.py
+```
+
+| 제스처 (엄지는 판정 제외) | 결과 |
+|---|---|
+| 검지만 폄 (ONE) | 1초 유지 → 작업 1 |
+| 검지 + 중지 (TWO) | 1초 유지 → 작업 2 |
+| 주먹 / 손바닥 / 애매한 모양 / 손 없음 | 실행 없음 |
+| 손 2개 이상 | 실행 보류 |
+
+- 실행 후 같은 제스처를 계속 보여도 재실행 안 됨. 손을 내린 상태가 1초 이어져야 다음 실행.
+- Gesture 실행 중에는 작업1·작업2 버튼과 Vision 버튼이 비활성화된다 (카메라 하나).
+- 로봇 없이 판정만 확인: `python src\vision\gesture.py` (q 종료)
 
 ## CI/CD
 

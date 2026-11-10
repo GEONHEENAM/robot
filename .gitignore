@@ -13,3 +13,7 @@ quiz3_registers.bad
 task2_height_result.csv
 
 .vscode/
+
+# MediaPipe 모델 (tools/download_hand_model.py 로 받음)
+models/*.task
+models/*.part

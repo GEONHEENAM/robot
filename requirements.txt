@@ -1,4 +1,6 @@
 pymodbus==3.13.1
 PyQt6==6.11.0
-opencv-python==5.0.0.93
+# mediapipe depends on opencv-contrib-python. Do NOT install opencv-python together.
+opencv-contrib-python==5.0.0.93
+mediapipe==1.2.2
 numpy==2.4.6

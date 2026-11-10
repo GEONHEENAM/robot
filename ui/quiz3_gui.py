@@ -17,10 +17,14 @@
 import csv
 import datetime
 import sys
+import threading
+import time
+from pathlib import Path
 
+import cv2
 from pymodbus.client import ModbusTcpClient
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QBrush, QColor, QFont
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QFont, QImage, QPixmap
 from PyQt6.QtNetwork import QAbstractSocket, QTcpSocket
 from PyQt6.QtWidgets import (
     QApplication,
@@ -41,6 +45,18 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from vision.detect import (  # noqa: E402
+    CAMERA_BACKEND,
+    CAMERA_INDEX,
+    find_largest_red_or_blue,
+)
+from vision.gesture_logic import GESTURE_TO_TASK, AutoTaskGate  # noqa: E402
+
 # ========================= 설정 =========================
 DEFAULT_MB_IP, DEFAULT_MB_PORT = "127.0.0.1", 5020     # 이 PC에서 연 Modbus 서버
 DEFAULT_ROBOT_IP, DEFAULT_ROBOT_PORT = "192.168.137.100", 9000  # 로봇 DRL 소켓
@@ -50,6 +66,9 @@ HR_START = 0          # Modbus 시작 주소 (0-based)
 HR_COUNT = 20
 POLL_MS = 500         # 레지스터 조회 주기
 TASK_TIMEOUT_MS = 60_000
+VISION_CONFIRM_FRAMES = 5
+GESTURE_HOLD_SEC = 1.0      # 같은 제스처를 이 시간 동안 유지해야 작업 실행
+GESTURE_RELEASE_SEC = 1.0   # 실행 후 손을 내린 상태가 이 시간 이어져야 다음 실행 허용
 
 # 레지스터 맵 (모두 0-based Modbus 주소)
 #   0~9   : 작업 1~10의 성공적인 완료 횟수
@@ -98,12 +117,178 @@ def mb_call(fn, *args, **kw):
         return fn(*args, slave=UNIT_ID, **kw)
 
 
+# ========================= Vision 스레드 =========================
+class VisionThread(QThread):
+    """카메라 캡처/검출을 UI 스레드 밖에서 수행한다."""
+
+    frame_ready = pyqtSignal(QImage)
+    detection_ready = pyqtSignal(str)
+    camera_ready = pyqtSignal(str, float, float)
+    vision_error = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop_requested = threading.Event()
+
+    def stop(self):
+        self._stop_requested.set()
+
+    def run(self):
+        open_started = time.perf_counter()
+        camera = cv2.VideoCapture(CAMERA_INDEX, CAMERA_BACKEND)
+        backend_name = "DirectShow" if CAMERA_BACKEND == cv2.CAP_DSHOW else "Default"
+        if not camera.isOpened() and CAMERA_BACKEND != cv2.CAP_ANY:
+            camera.release()
+            camera = cv2.VideoCapture(CAMERA_INDEX)
+            backend_name = "Default fallback"
+        open_seconds = time.perf_counter() - open_started
+
+        if not camera.isOpened():
+            camera.release()
+            self.vision_error.emit(f"카메라 {CAMERA_INDEX}번을 열 수 없습니다.")
+            return
+
+        first_frame = True
+        try:
+            while not self._stop_requested.is_set():
+                read_started = time.perf_counter()
+                ok, frame = camera.read()
+                if not ok:
+                    raise RuntimeError("카메라 프레임을 읽을 수 없습니다.")
+
+                if first_frame:
+                    first_read_seconds = time.perf_counter() - read_started
+                    self.camera_ready.emit(backend_name, open_seconds, first_read_seconds)
+                    first_frame = False
+
+                target = find_largest_red_or_blue(frame)
+                if target is None:
+                    detection = "None"
+                    status = "Target: not found"
+                    text_color = (0, 0, 255)
+                else:
+                    (cx, cy), detection = target
+                    cv2.drawMarker(
+                        frame,
+                        (cx, cy),
+                        (0, 255, 0),
+                        cv2.MARKER_CROSS,
+                        markerSize=24,
+                        thickness=2,
+                    )
+                    cv2.circle(frame, (cx, cy), 12, (0, 255, 0), 2)
+                    status = f"{detection}: ({cx}, {cy})"
+                    text_color = (0, 255, 0)
+
+                cv2.putText(
+                    frame,
+                    status,
+                    (16, 32),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    text_color,
+                    2,
+                    cv2.LINE_AA,
+                )
+                self.detection_ready.emit(detection)
+
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                height, width, channels = rgb.shape
+                image = QImage(
+                    rgb.data,
+                    width,
+                    height,
+                    channels * width,
+                    QImage.Format.Format_RGB888,
+                ).copy()
+                self.frame_ready.emit(image)
+        except RuntimeError as error:
+            self.vision_error.emit(str(error))
+        finally:
+            camera.release()
+
+
+# ========================= Gesture 스레드 (MediaPipe) =========================
+class GestureThread(QThread):
+    """카메라 + MediaPipe 손 스켈레톤 검출을 UI 스레드 밖에서 수행한다.
+
+    판정 결과(label)만 UI로 보내고, 작업 실행 여부는 UI 스레드의
+    AutoTaskGate가 결정한다(작업 중 여부 busy를 UI가 갖고 있으므로).
+    """
+
+    frame_ready = pyqtSignal(QImage)
+    label_ready = pyqtSignal(object)          # str 또는 None(손 없음)
+    camera_ready = pyqtSignal(str, float, float)
+    gesture_error = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop_requested = threading.Event()
+        self.status_text = ""                 # UI가 써 주는 진행 상태 (영상에 표시)
+
+    def stop(self):
+        self._stop_requested.set()
+
+    def run(self):
+        # mediapipe import가 무거워서 버튼을 누를 때 이 스레드에서 불러온다
+        try:
+            from vision.gesture import MIRROR, HandGestureDetector, draw_overlay, open_camera
+        except Exception as error:  # mediapipe/cv2 import 실패
+            self.gesture_error.emit(f"Gesture 모듈 로드 실패: {error}")
+            return
+
+        started = time.perf_counter()
+        try:
+            detector = HandGestureDetector()
+        except Exception as error:
+            self.gesture_error.emit(str(error))
+            return
+        try:
+            camera = open_camera()
+        except RuntimeError as error:
+            detector.close()
+            self.gesture_error.emit(str(error))
+            return
+        open_seconds = time.perf_counter() - started
+
+        first_frame = True
+        try:
+            while not self._stop_requested.is_set():
+                read_started = time.perf_counter()
+                ok, frame = camera.read()
+                if not ok:
+                    raise RuntimeError("카메라 프레임을 읽을 수 없습니다.")
+                if MIRROR:
+                    frame = cv2.flip(frame, 1)
+                result = detector.detect(frame)
+                if first_frame:
+                    self.camera_ready.emit(
+                        "MediaPipe", open_seconds, time.perf_counter() - read_started
+                    )
+                    first_frame = False
+
+                self.label_ready.emit(result.label)
+                draw_overlay(frame, result, detector.connections, self.status_text)
+
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                height, width, channels = rgb.shape
+                image = QImage(
+                    rgb.data, width, height, channels * width, QImage.Format.Format_RGB888
+                ).copy()
+                self.frame_ready.emit(image)
+        except Exception as error:   # 카메라·추론 오류 모두 화면에 표시하고 종료
+            self.gesture_error.emit(str(error))
+        finally:
+            camera.release()
+            detector.close()
+
+
 # ========================= 메인 UI =========================
 class RobotUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("협동로봇 작업 UI")
-        self.resize(1000, 760)
+        self.resize(1200, 880)
 
         self.mb: ModbusTcpClient | None = None
         self.mb_ok = False
@@ -111,6 +296,18 @@ class RobotUI(QWidget):
         self.robot_ready = False
         self.rx_buf = ""
         self.busy = False
+        self.vision_thread: VisionThread | None = None
+        self.vision_pixmap: QPixmap | None = None
+        self.vision_error_message: str | None = None
+        self.vision_detection = "None"
+        self.vision_frame_count = 0
+        self.vision_blocked_color = None
+        self.vision_release_count = 0
+        self.vision_started_at = 0.0
+        self.gesture_thread: GestureThread | None = None
+        self.gesture_gate = AutoTaskGate(GESTURE_HOLD_SEC, GESTURE_RELEASE_SEC)
+        self.gesture_error_message: str | None = None
+        self.gesture_last_label = "init"
         self.current_task = 0
         self.task2_base = 0    # 이번 작업 2 실행이 기록할 첫 Z 칸 (0 = 주소 10)
         self.csv_header_set = False
@@ -167,13 +364,18 @@ class RobotUI(QWidget):
         h = QHBoxLayout(task)
         self.btn_task1 = QPushButton("작업 1")
         self.btn_task2 = QPushButton("작업 2")
-        for b in (self.btn_task1, self.btn_task2):
+        self.btn_vision = QPushButton("Vision 시작")
+        self.btn_gesture = QPushButton("Gesture 시작")
+        self.btn_gesture.setToolTip("MediaPipe 손 제스처: 검지 1개 → 작업 1, 검지+중지 → 작업 2")
+        for b in (self.btn_task1, self.btn_task2, self.btn_vision, self.btn_gesture):
             b.setMinimumHeight(48)
         self.task_state = QLabel()
         self.task_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.task_state.setMinimumWidth(160)
         h.addWidget(self.btn_task1)
         h.addWidget(self.btn_task2)
+        h.addWidget(self.btn_vision)
+        h.addWidget(self.btn_gesture)
         h.addWidget(QLabel("상태:"))
         h.addWidget(self.task_state)
 
@@ -188,6 +390,24 @@ class RobotUI(QWidget):
         ph.addWidget(jnt_box, 6)
         self.base_xyz = self.base_joint = None     # 작업 시작 시점 값 (변화량 기준)
         self.prev_xyz = self.prev_joint = None     # 직전 POS 수신 값 (변경 강조용)
+
+        vision_box = QGroupBox("실시간 Vision")
+        vv = QVBoxLayout(vision_box)
+        self.vision_view = QLabel("Vision을 시작하면 카메라 영상이 표시됩니다.")
+        self.vision_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.vision_view.setMinimumSize(360, 240)
+        self.vision_view.setStyleSheet(
+            "background:#111827; color:#d1d5db; border:1px solid #374151;"
+        )
+        self.vision_status = QLabel("정지")
+        self.vision_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.vision_status.setStyleSheet("font-weight:bold; color:#6b7280;")
+        vv.addWidget(self.vision_view, 1)
+        vv.addWidget(self.vision_status)
+
+        monitor_row = QHBoxLayout()
+        monitor_row.addWidget(pos, 3)
+        monitor_row.addWidget(vision_box, 2)
 
         # 4) 작업 결과 1: 레지스터 모니터
         self.reg_table = QTableWidget(HR_COUNT, 4)
@@ -233,7 +453,7 @@ class RobotUI(QWidget):
         root = QVBoxLayout(self)
         root.addWidget(conn)
         root.addWidget(task)
-        root.addWidget(pos)
+        root.addLayout(monitor_row, 3)
         root.addWidget(tabs, 3)
         root.addWidget(log_box, 2)
 
@@ -307,6 +527,8 @@ class RobotUI(QWidget):
         self.rb_btn.clicked.connect(self.toggle_robot)
         self.btn_task1.clicked.connect(lambda: self.start_task(1))
         self.btn_task2.clicked.connect(lambda: self.start_task(2))
+        self.btn_vision.clicked.connect(self.start_vision)
+        self.btn_gesture.clicked.connect(self.toggle_gesture)
         self.btn_csv_load.clicked.connect(self.load_csv)
         self.btn_csv_save.clicked.connect(self.save_csv)
         self.btn_csv_clear.clicked.connect(self.clear_csv)
@@ -336,11 +558,246 @@ class RobotUI(QWidget):
 
     def update_buttons(self):
         robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
-        enable = self.mb_ok and robot_ok and self.robot_ready and not self.busy
+        ready = self.mb_ok and robot_ok and self.robot_ready
+        vision_on = self.vision_thread is not None
+        gesture_on = self.gesture_thread is not None
+        # 자동 모드(Vision/Gesture) 실행 중에는 수동 작업 버튼을 막는다
+        enable = ready and not self.busy and not vision_on and not gesture_on
         self.btn_task1.setEnabled(enable)
         self.btn_task2.setEnabled(enable)
+        # 카메라는 하나: Vision과 Gesture는 동시에 실행하지 않는다
+        self.btn_vision.setEnabled(not gesture_on)
+        self.btn_gesture.setEnabled(not vision_on)
         self.mb_btn.setEnabled(not self.busy)
         self.rb_btn.setEnabled(not self.busy)
+
+    # ---------------- Vision ----------------
+    def start_vision(self):
+        if self.vision_thread is not None:
+            if self.vision_thread.isRunning():
+                self.stop_vision()
+            return
+
+        self.vision_error_message = None
+        self.vision_detection = "None"
+        self.vision_frame_count = 0
+        self.vision_blocked_color = None
+        self.vision_release_count = 0
+        self.vision_started_at = time.perf_counter()
+        self.log("Vision 실행: 카메라 준비 중")
+        self.vision_status.setText("카메라 준비 중…")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#d97706;")
+        self.btn_vision.setText("Vision 정지")
+
+        self.vision_thread = VisionThread(self)
+        self.vision_thread.frame_ready.connect(self.on_vision_frame)
+        self.vision_thread.detection_ready.connect(self.handle_vision_detection)
+        self.vision_thread.camera_ready.connect(self.on_vision_ready)
+        self.vision_thread.vision_error.connect(self.on_vision_error)
+        self.vision_thread.finished.connect(self.on_vision_finished)
+        self.vision_thread.start()
+        self.update_buttons()
+
+    def stop_vision(self):
+        if self.vision_thread is not None and self.vision_thread.isRunning():
+            self.vision_status.setText("종료 중…")
+            self.vision_thread.stop()
+
+    def on_vision_ready(self, backend, open_seconds, first_frame_seconds):
+        total_seconds = time.perf_counter() - self.vision_started_at
+        self.log(
+            f"Vision 준비 완료 ({backend}): 전체 {total_seconds:.2f}초, "
+            f"카메라 열기 {open_seconds:.2f}초, 첫 프레임 {first_frame_seconds:.2f}초"
+        )
+        self.vision_status.setText("실행 중 · 검출: None")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#16a34a;")
+
+    def on_vision_frame(self, image):
+        self.vision_pixmap = QPixmap.fromImage(image)
+        self._show_vision_pixmap()
+
+    def _show_vision_pixmap(self):
+        pixmap = getattr(self, "vision_pixmap", None)
+        if pixmap is None or not hasattr(self, "vision_view"):
+            return
+        scaled = pixmap.scaled(
+            self.vision_view.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.vision_view.setPixmap(scaled)
+
+    def handle_vision_detection(self, value):
+        color = {"Red": "#dc2626", "Blue": "#2563eb"}.get(value, "#16a34a")
+        self.vision_status.setText(f"실행 중 · 검출: {value}")
+        self.vision_status.setStyleSheet(f"font-weight:bold; color:{color};")
+
+        # 직전 작업을 일으킨 색상은 연속 5프레임 동안 보이지 않아야 잠금을 해제한다.
+        if self.vision_blocked_color is not None:
+            if value == self.vision_blocked_color:
+                self.vision_release_count = 0
+            else:
+                self.vision_release_count += 1
+                if self.vision_release_count >= VISION_CONFIRM_FRAMES:
+                    self.log(f"{self.vision_blocked_color} 제거 확인: 재검출 허용")
+                    self.vision_blocked_color = None
+                    self.vision_release_count = 0
+
+            if self.vision_blocked_color is not None:
+                self.vision_detection = "None"
+                self.vision_frame_count = 0
+                return
+
+        # 작업 중에는 새 색상의 프레임 수를 쌓지 않는다.
+        if self.busy:
+            self.vision_detection = "None"
+            self.vision_frame_count = 0
+            return
+
+        if value not in ("Red", "Blue"):
+            self.vision_detection = "None"
+            self.vision_frame_count = 0
+            return
+
+        if value == self.vision_detection:
+            self.vision_frame_count += 1
+        else:
+            self.vision_detection = value
+            self.vision_frame_count = 1
+
+        self.log(f"Vision 감지: {value} ({self.vision_frame_count}/{VISION_CONFIRM_FRAMES})")
+        if self.vision_frame_count >= VISION_CONFIRM_FRAMES:
+            task_number = 1 if value == "Red" else 2
+            self.vision_blocked_color = value
+            self.vision_release_count = 0
+            self.vision_detection = "None"
+            self.vision_frame_count = 0
+
+            robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
+            if not (self.mb_ok and robot_ok and self.robot_ready):
+                self.log(f"{value} 확정, 연결 준비가 되지 않아 작업 {task_number} 실행 안 함")
+                return
+
+            self.log(f"{value} 확정: Vision을 유지하고 작업 {task_number} 실행")
+            self.start_task(task_number)
+
+    def on_vision_finished(self):
+        self.vision_detection = "None"
+        self.vision_frame_count = 0
+        self.vision_blocked_color = None
+        self.vision_release_count = 0
+        self.vision_thread = None
+        self.vision_pixmap = None
+        self.vision_view.clear()
+        if self.vision_error_message:
+            self.vision_view.setText(self.vision_error_message)
+            self.vision_status.setText("오류")
+            self.vision_status.setStyleSheet("font-weight:bold; color:#dc2626;")
+        else:
+            self.vision_view.setText("Vision을 시작하면 카메라 영상이 표시됩니다.")
+            self.vision_status.setText("정지")
+            self.vision_status.setStyleSheet("font-weight:bold; color:#6b7280;")
+        self.btn_vision.setText("Vision 시작")
+        self.log("Vision 종료")
+        self.update_buttons()
+
+    def on_vision_error(self, message):
+        self.vision_error_message = message
+        self.log(f"Vision 오류: {message}")
+        self.vision_status.setText("오류")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#dc2626;")
+
+    # ---------------- Gesture (MediaPipe) ----------------
+    def toggle_gesture(self):
+        if self.gesture_thread is not None:
+            if self.gesture_thread.isRunning():
+                self.vision_status.setText("Gesture 종료 중…")
+                self.gesture_thread.stop()     # 진행 중 작업은 그대로 완료 절차를 따른다
+            return
+        if self.vision_thread is not None:
+            self.log("Vision 실행 중에는 Gesture를 시작할 수 없습니다.")
+            return
+
+        self.gesture_error_message = None
+        self.gesture_gate.reset()
+        self.gesture_last_label = "init"
+        self.log("Gesture 실행: 모델·카메라 준비 중 (첫 실행은 수 초 걸릴 수 있음)")
+        self.vision_status.setText("Gesture 준비 중…")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#d97706;")
+        self.btn_gesture.setText("Gesture 정지")
+
+        self.gesture_thread = GestureThread(self)
+        self.gesture_thread.frame_ready.connect(self.on_vision_frame)
+        self.gesture_thread.label_ready.connect(self.handle_gesture_label)
+        self.gesture_thread.camera_ready.connect(self.on_gesture_ready)
+        self.gesture_thread.gesture_error.connect(self.on_gesture_error)
+        self.gesture_thread.finished.connect(self.on_gesture_finished)
+        self.gesture_thread.start()
+        self.update_buttons()
+
+    def on_gesture_ready(self, backend, open_seconds, first_frame_seconds):
+        self.log(
+            f"Gesture 준비 완료 ({backend}): 모델·카메라 {open_seconds:.2f}초, "
+            f"첫 추론 {first_frame_seconds:.2f}초"
+        )
+
+    def handle_gesture_label(self, label):
+        now = time.monotonic()
+        task_number = self.gesture_gate.update(label, now, self.busy)
+
+        # 영상 위·상태줄 표시
+        if self.busy:
+            status = "작업 중"
+        elif self.gesture_gate.locked:
+            status = "손을 내리면 다음 실행"
+        elif label in GESTURE_TO_TASK:
+            status = f"유지 {self.gesture_gate.progress(now) * 100:.0f}%"
+        else:
+            status = "대기"
+        if self.gesture_thread is not None:
+            self.gesture_thread.status_text = status
+        shown = label or "손 없음"
+        color = {"ONE": "#dc2626", "TWO": "#2563eb"}.get(label, "#16a34a")
+        self.vision_status.setText(f"Gesture · {shown} · {status}")
+        self.vision_status.setStyleSheet(f"font-weight:bold; color:{color};")
+
+        if label != self.gesture_last_label:      # 바뀔 때만 로그 (프레임마다 쓰면 로그가 넘침)
+            self.log(f"Gesture 판정: {shown}")
+            self.gesture_last_label = label
+
+        if task_number is None:
+            return
+        robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
+        if not (self.mb_ok and robot_ok and self.robot_ready):
+            self.log(f"{label} 확정, 연결 준비가 되지 않아 작업 {task_number} 실행 안 함")
+            return
+        self.log(f"{label} 제스처 확정: 작업 {task_number} 실행")
+        self.start_task(task_number)
+
+    def on_gesture_error(self, message):
+        self.gesture_error_message = message
+        self.log(f"Gesture 오류: {message}")
+        self.vision_status.setText("Gesture 오류")
+        self.vision_status.setStyleSheet("font-weight:bold; color:#dc2626;")
+
+    def on_gesture_finished(self):
+        if self.gesture_thread is not None:
+            self.gesture_thread.deleteLater()
+        self.gesture_thread = None
+        self.gesture_gate.reset()
+        self.vision_pixmap = None
+        self.vision_view.clear()
+        if self.gesture_error_message:
+            self.vision_view.setText(self.gesture_error_message)
+            self.vision_status.setText("Gesture 오류")
+            self.vision_status.setStyleSheet("font-weight:bold; color:#dc2626;")
+        else:
+            self.vision_view.setText("Vision 또는 Gesture를 시작하면 카메라 영상이 표시됩니다.")
+            self.vision_status.setText("정지")
+            self.vision_status.setStyleSheet("font-weight:bold; color:#6b7280;")
+        self.btn_gesture.setText("Gesture 시작")
+        self.log("Gesture 종료")
+        self.update_buttons()
 
     # ---------------- Modbus ----------------
     def toggle_modbus(self):
@@ -659,8 +1116,24 @@ class RobotUI(QWidget):
                 f.write(self.log_view.toPlainText())
 
     # ---------------- 종료 ----------------
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._show_vision_pixmap()
+
     def closeEvent(self, e):
         self.poll_timer.stop()
+        if self.vision_thread is not None and self.vision_thread.isRunning():
+            self.vision_thread.stop()
+            if not self.vision_thread.wait(3000):
+                self.log("Vision 종료를 기다리는 중입니다. 잠시 후 다시 닫아 주세요.")
+                e.ignore()
+                return
+        if self.gesture_thread is not None and self.gesture_thread.isRunning():
+            self.gesture_thread.stop()
+            if not self.gesture_thread.wait(3000):
+                self.log("Gesture 종료를 기다리는 중입니다. 잠시 후 다시 닫아 주세요.")
+                e.ignore()
+                return
         if self.mb:
             self.mb.close()
         self.robot.abort()
