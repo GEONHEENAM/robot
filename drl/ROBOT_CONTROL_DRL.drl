@@ -87,28 +87,35 @@ def gripper_open():
     set_tool_digital_output(2)
     wait(0.5)
     
+# 퀴즈1 메시지 규칙: 실행 직전 "MoveJ Start"/"MoveL Start", 실제 이동 완료 후 "MoveJ 종료"/"MoveL 종료"
+# 대소문자·공백을 문제지 표와 똑같이 유지한다. 상대이동(REL)도 MoveL 메시지를 쓴다.
+MSG_MOVEJ_START = "MoveJ Start"
+MSG_MOVEJ_END = "MoveJ 종료"
+MSG_MOVEL_START = "MoveL Start"
+MSG_MOVEL_END = "MoveL 종료"
+
 def move_jx(pos, v = VJ, a = AJ):
-    send_msg("MoveJ Start")
+    send_msg(MSG_MOVEJ_START)
     movejx(pos, v, a, sol=SOL)
-    send_msg("MoveJ Done")
+    send_msg(MSG_MOVEJ_END)
     send_pos()
 
 def move_j(pos, v = VJ, a = AJ):
-    send_msg("MoveJ Start")
+    send_msg(MSG_MOVEJ_START)
     movej(pos, v, a)
-    send_msg("MoveJ Done")
+    send_msg(MSG_MOVEJ_END)
     send_pos()
 
 def move_l(pos, v = VL, a = AL):
-    send_msg("MoveL Start")
+    send_msg(MSG_MOVEL_START)
     movel(pos, v, a)
-    send_msg("MoveL Done")
+    send_msg(MSG_MOVEL_END)
     send_pos()
 
 def move_l_REL(dist, v = VL, a = AL):
-    send_msg("MoveL_REL Start")
+    send_msg(MSG_MOVEL_START)
     movel(dist, mod=DR_MV_MOD_REL, v=v, a=a)
-    send_msg("MoveL_REL Done")
+    send_msg(MSG_MOVEL_END)
     send_pos()
 
 def grip_on():
