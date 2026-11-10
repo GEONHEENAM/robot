@@ -3,9 +3,17 @@
 로봇(DRL) → PC 메시지 흐름 (작업 2, 물체 1개 = 작업 1개)
     JOB,id,length,px,py,pz,prx,pry,prz,qx,qy,qz,qrx,qry,qrz   작업 번호·길이·Pick/Place 목표점
     MoveJ Start          ← 이 작업의 첫 MoveJ Start 수신 시각 = 시작 시각
-    ... (MoveL / Gripper 메시지)
-    MoveL 종료           ← 마지막 MoveL 종료 수신 시각 = 종료 시각 (놓고 상승 완료)
+    ... (이동 / Gripper 메시지)
+    MoveJ Done 등        ← JOB_DONE 직전의 마지막 '이동 완료' 수신 시각 = 종료 시각 (놓고 상승 완료)
     JOB_DONE,id          ← 필수 데이터 확인 후 CSV 한 행 추가
+
+종료 시각을 'MoveL 종료'로 고정하지 않는 이유
+    마지막 상승을 move_jx(MoveJ)로 하는 DRL도 있어서, MoveL만 보면 종료 시각이
+    상승 전으로 찍힌다. 어떤 이동이든 JOB_DONE 직전의 마지막 완료 메시지가 '상승 완료'다.
+
+이동 메시지 형식
+    퀴즈1 문제지 형식("MoveJ 종료")과 다른 형식("MoveJ Done", "MoveL_REL Start/Done")이
+    섞여 있어도 CSV가 깨지지 않게 모두 인정한다. (어느 형식을 보낼지는 DRL에서 정한다)
 
 규칙 (퀴즈2 문제지)
     - 작업 1회당 한 행, 정상 종료 시 한 번만 저장
@@ -18,11 +26,21 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
-MSG_MOVEJ_START = "MoveJ Start"
-MSG_MOVEL_END = "MoveL 종료"
+# 이동 메시지: "MoveJ Start", "MoveL 종료", "MoveJ Done", "MoveL_REL Start", "MoveL_REL Done" ...
+_MOTION_RE = re.compile(r"^Move(J|L|L_REL)\s+(Start|Done|종료)$")
+
+
+def motion_event(line: str) -> tuple[str, str] | None:
+    """이동 메시지면 (종류, 'start'|'end') 반환. 종류는 'J' / 'L' / 'L_REL'. 아니면 None."""
+    m = _MOTION_RE.match(line.strip())
+    if not m:
+        return None
+    kind, word = m.groups()
+    return kind, ("start" if word == "Start" else "end")
 
 AXES = ("x", "y", "z", "rx", "ry", "rz")
 CSV_HEADER = (
@@ -63,6 +81,7 @@ class Task2Recorder:
         """작업 2 한 번 실행을 시작할 때 호출한다."""
         self.job: Task2Job | None = None
         self.saved_ids: set[int] = set()
+        self.jobs_seen = 0     # 이번 실행에서 받은 JOB 수 (0이면 DRL이 JOB을 안 보내는 것)
 
     def start_job(self, body: str) -> str | None:
         """JOB 메시지 본문(쉼표 뒤)을 받는다. 이전 작업이 끝나지 않았으면 경고 문자열 반환."""
@@ -81,16 +100,25 @@ class Task2Recorder:
         if self.job is not None:
             warning = f"작업 {self.job.job_id}가 JOB_DONE 없이 끝나 저장하지 않음"
         self.job = Task2Job(job_id, nums[0], nums[1:7], nums[7:13])
+        self.jobs_seen += 1
         return warning
 
     def on_line(self, line: str, now: dt.datetime) -> None:
-        """모든 수신 줄을 넘긴다. 진행 중인 작업의 시작·종료 시각만 갱신한다."""
+        """모든 수신 줄을 넘긴다. 진행 중인 작업의 시작·종료 시각만 갱신한다.
+
+        시작 = JOB 이후 첫 MoveJ Start
+        종료 = 시작 이후 마지막 이동 완료 (MoveJ/MoveL/MoveL_REL, Done/종료 모두)
+        """
         if self.job is None:
             return
-        if line == MSG_MOVEJ_START and self.job.start is None:
+        ev = motion_event(line)
+        if ev is None:
+            return
+        kind, phase = ev
+        if phase == "start" and kind == "J" and self.job.start is None:
             self.job.start = now
-        elif line == MSG_MOVEL_END and self.job.start is not None:
-            self.job.end = now   # 계속 덮어써서 '마지막' MoveL 종료가 남는다
+        elif phase == "end" and self.job.start is not None:
+            self.job.end = now   # 계속 덮어써서 JOB_DONE 직전의 '마지막' 완료가 남는다
 
     def finish_job(self, body: str) -> list[str]:
         """JOB_DONE 본문을 받아 CSV 한 행을 반환한다. 저장할 수 없으면 JobRecordError."""
@@ -106,7 +134,7 @@ class Task2Recorder:
         if job.start is None:
             raise JobRecordError(f"작업 {done_id}: MoveJ Start 미수신")
         if job.end is None:
-            raise JobRecordError(f"작업 {done_id}: MoveL 종료 미수신")
+            raise JobRecordError(f"작업 {done_id}: 이동 완료 메시지 미수신")
         if done_id in self.saved_ids:
             raise JobRecordError(f"작업 {done_id}는 이미 저장됨")
 

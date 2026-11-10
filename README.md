@@ -148,7 +148,7 @@ python ui\quiz3_gui.py
 |---|---|
 | `job_id`, `length_mm` | 물체 번호, 접촉 측정 Z (mm) |
 | `pick_*`, `place_*` | 실제 명령한 집기·놓기 목표점 X, Y, Z, Rx, Ry, Rz |
-| `start_time`, `end_time`, `duration_s` | 그 물체의 첫 `MoveJ Start` ~ 놓고 상승한 마지막 `MoveL 종료` (PC 수신 시각) |
+| `start_time`, `end_time`, `duration_s` | 그 물체의 첫 `MoveJ Start` ~ `JOB_DONE` 직전 마지막 이동 완료 = 놓고 상승 완료 (PC 수신 시각) |
 
 - 열 제목은 파일을 처음 만들 때만 쓴다. 이후 실행은 같은 파일에 이어 쓴다.
 - 이송 중 오류·연결 끊김·타임아웃으로 끝난 물체는 저장하지 않는다.
@@ -157,6 +157,14 @@ python ui\quiz3_gui.py
 - 예전 형식(열 제목이 다른) 파일이 있으면 `task2_height_result_old_날짜.csv`로 보관하고 새로 만든다.
 
 로봇 → PC 메시지 (작업 2, 물체마다): `JOB,id,length,pick6,place6` → 모션 메시지 → `JOB_DONE,id`
+
+- 이동 메시지는 `MoveJ 종료` / `MoveJ Done` / `MoveL_REL Done` 형식을 모두 인정한다 (DRL 형식이 바뀌어도 CSV 유지).
+- **펜던트 DRL이 `JOB`/`JOB_DONE`을 안 보내면 CSV는 0행**이다. 작업 중 로그에 경고가 뜨고, 끝날 때 원인이 표시된다. DART-Studio 프로젝트의 `main.drl`을 저장소 최신본으로 바꿔 올릴 것.
+
+### 작업 응답 없음 (타임아웃)
+
+- 작업 중 로봇 메시지가 `TASK_IDLE_TIMEOUT_MS`(기본 60초) 동안 **한 줄도 안 오면** 오류로 끝낸다. 작업 전체 시간 제한이 아니어서, 로봇이 메시지를 계속 보내는 한 오래 걸리는 작업도 끝까지 기록된다.
+- 응답 없음으로 끝나면 Vision/Gesture 자동 실행을 멈추고, 로봇이 `DONE`/`ERROR`를 보내거나 재연결할 때까지 새 작업을 보내지 않는다 (움직이는 중인 로봇에 다음 명령이 쌓이는 것 방지).
 
 ### Gesture (MediaPipe 손 스켈레톤 → 로봇 작업)
 

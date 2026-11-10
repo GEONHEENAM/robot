@@ -10,6 +10,7 @@ from robot_comm.task2_record import (
     JobRecordError,
     Task2Recorder,
     append_row,
+    motion_event,
 )
 
 T0 = dt.datetime(2026, 11, 10, 15, 0, 0)
@@ -57,13 +58,73 @@ def test_missing_movel_end_not_saved():
 
 
 def test_movel_end_before_start_is_ignored():
-    """MoveJ Start 전에 온 MoveL 종료(이전 작업 잔여)는 종료 시각으로 쓰지 않는다."""
+    """MoveJ Start 전에 온 이동 완료(이전 작업 잔여)는 종료 시각으로 쓰지 않는다."""
     rec = Task2Recorder()
     rec.start_job(JOB1)
     rec.on_line("MoveL 종료", at(0.5))
     rec.on_line("MoveJ Start", at(1))
-    with pytest.raises(JobRecordError, match="MoveL 종료"):
+    with pytest.raises(JobRecordError, match="이동 완료"):
         rec.finish_job("1")
+
+
+def test_pr13_messages_and_movej_final_lift():
+    """PR #13 DRL 형식: Done 메시지, MoveL_REL, 놓은 뒤 상승이 move_jx(MoveJ).
+
+    종료 시각은 JOB_DONE 직전의 마지막 '이동 완료'(여기서는 MoveJ Done)여야 한다.
+    """
+    rec = Task2Recorder()
+    rec.start_job(JOB1)
+    rec.on_line("Gripper OFF", at(0.5))
+    rec.on_line("MoveJ Start", at(1))          # 시작
+    rec.on_line("MoveJ Done", at(2))
+    rec.on_line("MoveL Start", at(2.1))
+    rec.on_line("MoveL Done", at(3))
+    rec.on_line("Gripper ON", at(4))
+    rec.on_line("MoveL_REL Start", at(4.1))
+    rec.on_line("MoveL_REL Done", at(5))
+    rec.on_line("MoveJ Start", at(6))
+    rec.on_line("MoveJ Done", at(7))
+    rec.on_line("MoveL Start", at(7.1))
+    rec.on_line("MoveL Done", at(8))           # 놓기 위치 하강 완료 (상승 전)
+    rec.on_line("Gripper OFF", at(9))
+    rec.on_line("MoveJ Start", at(9.1))
+    rec.on_line("MoveJ Done", at(10))          # 상승 완료 = 종료
+    row = rec.finish_job("1")
+    assert row[14] == "2026-11-10 15:00:01.000"
+    assert row[15] == "2026-11-10 15:00:10.000"
+    assert row[16] == "9.000"
+
+
+def test_first_start_must_be_movej():
+    """퀴즈2 규칙: 시작 시각은 첫 'MoveJ Start'. MoveL Start로는 시작하지 않는다."""
+    rec = Task2Recorder()
+    rec.start_job(JOB1)
+    rec.on_line("MoveL Start", at(0.5))
+    rec.on_line("MoveL 종료", at(0.8))
+    rec.on_line("MoveJ Start", at(1))
+    rec.on_line("MoveJ 종료", at(2))
+    row = rec.finish_job("1")
+    assert row[14].endswith("15:00:01.000")
+    assert row[15].endswith("15:00:02.000")
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("MoveJ Start", ("J", "start")),
+    ("MoveJ 종료", ("J", "end")),
+    ("MoveJ Done", ("J", "end")),
+    ("MoveL Start", ("L", "start")),
+    ("MoveL 종료", ("L", "end")),
+    ("MoveL Done", ("L", "end")),
+    ("MoveL_REL Start", ("L_REL", "start")),
+    ("MoveL_REL Done", ("L_REL", "end")),
+    ("  MoveJ Done ", ("J", "end")),
+    ("Gripper ON", None),
+    ("MoveJ", None),
+    ("MoveJ Started", None),
+    ("TASK 1 Accepted", None),
+])
+def test_motion_event(line, expected):
+    assert motion_event(line) == expected
 
 
 def test_job_id_mismatch_not_saved():

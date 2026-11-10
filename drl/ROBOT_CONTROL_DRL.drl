@@ -233,6 +233,15 @@ def TASK2():
         grip_z = max(h, MIN_DEPTH)
         place_z = grip_z + PLACE_MARGIN
 
+        # [메시지 전용] 퀴즈2 CSV용 작업 정보. 아래 이동 명령과 같은 목표점을 계산해 보내기만 한다.
+        pick_t = with_z(p_up, grip_z)
+        place_t = with_z(PLACE_UP[slot], place_z)
+        send_msg("JOB,{0},{1:.2f},{2:.2f},{3:.2f},{4:.2f},{5:.2f},{6:.2f},{7:.2f},"
+                 "{8:.2f},{9:.2f},{10:.2f},{11:.2f},{12:.2f},{13:.2f}".format(
+                     job_id, h,
+                     pick_t[0], pick_t[1], pick_t[2], pick_t[3], pick_t[4], pick_t[5],
+                     place_t[0], place_t[1], place_t[2], place_t[3], place_t[4], place_t[5]))
+
         grip_off()
         move_jx(p_up)
         move_l(with_z(p_up, grip_z), v=VL_DOWN)
@@ -242,6 +251,8 @@ def TASK2():
         move_l(with_z(PLACE_UP[slot], place_z), v=VL_DOWN)
         grip_off()
         move_jx(PLACE_UP[slot])
+
+        send_msg("JOB_DONE,{0}".format(job_id))     # [메시지 전용] 이 물체 이송 정상 종료
 
     movej(HOME, v=VJ, a=AJ)
 

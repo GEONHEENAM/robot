@@ -58,6 +58,7 @@ from robot_comm.task2_record import (  # noqa: E402
     JobRecordError,
     Task2Recorder,
     append_row,
+    motion_event,
 )
 from vision.detect import (  # noqa: E402
     CAMERA_BACKEND,
@@ -74,7 +75,10 @@ UNIT_ID = 1
 HR_START = 0          # Modbus 시작 주소 (0-based)
 HR_COUNT = 20
 POLL_MS = 500         # 레지스터 조회 주기
-TASK_TIMEOUT_MS = 60_000
+# 작업 중 로봇 메시지가 이 시간 동안 한 줄도 안 오면 '응답 없음'으로 본다 (무응답 감시).
+# 작업 전체 시간 제한이 아니다: 메시지를 받을 때마다 다시 센다.
+# 가장 긴 조용한 구간(작업2 힘 제어 하강 등)보다 길어야 한다. 실측 후 조정.
+TASK_IDLE_TIMEOUT_MS = 60_000
 VISION_CONFIRM_FRAMES = 5
 RANDOM_TASK_PROBABILITY = 0.20
 GESTURE_HOLD_SEC = 1.0      # 같은 제스처를 이 시간 동안 유지해야 작업 실행
@@ -309,6 +313,12 @@ class RobotUI(QWidget):
         self.robot_ready = False
         self.rx_buf = b""     # 바이트로 모은 뒤 줄 단위로 디코딩 (한글 바이트가 잘려 와도 안전)
         self.busy = False
+        # 응답 없음(타임아웃)으로 UI는 작업을 끝냈지만 로봇은 아직 움직이고 있을 수 있는 상태.
+        # 로봇이 작업 끝 메시지를 보내거나 재연결될 때까지 새 작업을 보내지 않는다
+        # (안 막으면 다음 TASK가 로봇 소켓에 쌓였다가 현재 작업이 끝나자마자 실행됨).
+        self.robot_unsynced = False
+        self.task2_order_seen = False      # 이번 작업 2에서 측정이 끝나고 ORDER를 받았는지
+        self.task2_warned_no_job = False   # 이번 작업 2에서 'JOB 없이 이송 시작' 경고를 했는지
         self.vision_thread: VisionThread | None = None
         self.vision_pixmap: QPixmap | None = None
         self.vision_error_message: str | None = None
@@ -334,7 +344,7 @@ class RobotUI(QWidget):
 
         self.task_timer = QTimer(self)
         self.task_timer.setSingleShot(True)
-        self.task_timer.timeout.connect(lambda: self.finish_task(False, "응답 시간 초과"))
+        self.task_timer.timeout.connect(self.on_task_idle_timeout)
 
         self.set_task_state(STATE_IDLE)
         self.update_buttons()
@@ -572,7 +582,7 @@ class RobotUI(QWidget):
 
     def update_buttons(self):
         robot_ok = self.robot.state() == QAbstractSocket.SocketState.ConnectedState
-        ready = self.mb_ok and robot_ok and self.robot_ready
+        ready = self.mb_ok and robot_ok and self.robot_ready and not self.robot_unsynced
         vision_on = self.vision_thread is not None
         gesture_on = self.gesture_thread is not None
         # 자동 모드(Vision/Gesture) 실행 중에는 수동 작업 버튼을 막는다
@@ -929,6 +939,7 @@ class RobotUI(QWidget):
 
     def on_robot_connected(self):
         self.robot_ready = False
+        self.robot_unsynced = False   # 새 연결 = 로봇 프로그램이 새로 대기 중
         self.rx_buf = b""     # 이전 연결에서 남은 조각 제거
         self.set_conn_label(self.rb_status, True, "● READY 대기")
         self.rb_btn.setText("해제")
@@ -946,6 +957,7 @@ class RobotUI(QWidget):
         self.log("로봇 연결 해제")
         if self.busy:
             self.finish_task(False, "작업 중 로봇 연결 끊김")
+        self.robot_unsynced = False   # 다시 연결하면 READY부터 새로 시작
         self.update_buttons()
 
     def on_robot_error(self, err):
@@ -969,9 +981,27 @@ class RobotUI(QWidget):
         cmd, _, body = line.partition(",")
         cmd = cmd.upper()
 
+        if self.busy:
+            # 무응답 감시: 로봇이 메시지를 보내는 동안은 작업이 길어져도 타임아웃 나지 않는다
+            self.task_timer.start(TASK_IDLE_TIMEOUT_MS)
+        elif self.robot_unsynced and (cmd in ("DONE", "ERROR", "READY") or "FAILED" in cmd):
+            self.robot_unsynced = False
+            self.log(f"로봇 작업 종료 확인 ({line}) → 다시 작업 실행 가능")
+            self.update_buttons()
+
         recording = self.busy and self.current_task == 2
         if recording:
             self.task2_rec.on_line(line, now)
+            if cmd.startswith("ORDER"):
+                self.task2_order_seen = True
+            elif (self.task2_order_seen and not self.task2_warned_no_job
+                  and self.task2_rec.jobs_seen == 0 and motion_event(line) is not None):
+                # 측정이 끝나고 이송이 시작됐는데 JOB이 안 옴 → 이번 실행은 CSV가 남지 않는다
+                self.task2_warned_no_job = True
+                self.log("경고: 로봇이 JOB 메시지 없이 이송을 시작함 → "
+                         "이번 작업 2는 CSV에 저장되지 않습니다. "
+                         "펜던트에 올라간 DRL이 JOB/JOB_DONE을 보내는 최신 버전인지 "
+                         "확인하세요 (DART-Studio 프로젝트의 main.drl).")
 
         if cmd == "POS":
             try:
@@ -1009,7 +1039,7 @@ class RobotUI(QWidget):
 
         elif cmd == "JOB":
             if not recording:
-                self.log(f"작업 2 외 JOB 수신: {line}")
+                self.log(f"작업 2 외 JOB 수신: {line}{self._late_note()}")
                 return
             try:
                 warning = self.task2_rec.start_job(body)
@@ -1023,7 +1053,7 @@ class RobotUI(QWidget):
 
         elif cmd == "JOB_DONE":
             if not recording:
-                self.log(f"작업 2 외 JOB_DONE 수신: {line}")
+                self.log(f"작업 2 외 JOB_DONE 수신: {line}{self._late_note()}")
                 return
             try:
                 row = self.task2_rec.finish_job(body)
@@ -1085,6 +1115,11 @@ class RobotUI(QWidget):
     def start_task(self, n, command=None):
         if self.busy:
             return
+        if self.robot_unsynced:
+            # Vision/Gesture 자동 실행도 여기서 막힌다
+            self.log(f"작업 {n} 실행 안 함: 이전 작업이 응답 없음으로 끝나 로봇 상태를 모름 "
+                     "(로봇의 DONE/ERROR 수신 또는 재연결 후 가능)")
+            return
         if n == 2:
             # 로봇을 움직이기 전에 측정값 3개를 기록할 칸이 있는지 확인한다.
             base = self.next_task2_slot()
@@ -1098,6 +1133,8 @@ class RobotUI(QWidget):
 
         if n == 2:
             self.task2_rec.reset()
+            self.task2_order_seen = False
+            self.task2_warned_no_job = False
             self.clear_csv()
             self.append_csv_row(CSV_HEADER)          # 화면 표의 열 제목 (이번 실행 결과만 표시)
             self.log(f"작업 2 측정값 기록 위치: 주소 {TASK2_Z_START + self.task2_base}~"
@@ -1109,8 +1146,54 @@ class RobotUI(QWidget):
         command = str(n) if command is None else command
         self.robot.write(f"TASK,{command}\n".encode())
         self.robot.flush()
-        self.task_timer.start(TASK_TIMEOUT_MS)
+        self.task_timer.start(TASK_IDLE_TIMEOUT_MS)
         self.log(f"작업 {n} 시작 (명령: TASK,{command})")
+
+    def on_task_idle_timeout(self):
+        """작업 중 TASK_IDLE_TIMEOUT_MS 동안 로봇 메시지가 없을 때."""
+        if not self.busy:
+            return
+        sec = f"{TASK_IDLE_TIMEOUT_MS / 1000:g}"
+        # 로봇은 아직 움직이는 중일 수 있다 → 작업 끝을 확인할 때까지 새 작업 금지
+        self.robot_unsynced = True
+        self.finish_task(False, f"로봇 응답 없음 ({sec}초 동안 메시지 없음)")
+        if self.vision_thread is not None and self.vision_thread.isRunning():
+            self.log("응답 없음: Vision 자동 실행 정지")
+            self.stop_vision()
+        if self.gesture_thread is not None and self.gesture_thread.isRunning():
+            self.log("응답 없음: Gesture 자동 실행 정지")
+            self.gesture_thread.stop()
+        self.log("로봇이 DONE/ERROR를 보내거나 재연결할 때까지 새 작업을 보내지 않습니다. "
+                 "로봇 상태(펜던트)를 확인하세요.")
+        self.update_buttons()
+
+    def _late_note(self):
+        """작업이 끝난 뒤 도착한 작업 2 메시지에 붙이는 설명."""
+        if self.robot_unsynced:
+            return " (작업 2가 응답 없음으로 이미 종료됨 → CSV에 저장하지 않음)"
+        return ""
+
+    def _report_task2_csv(self, ok, reason):
+        """작업 2 종료 시 CSV 저장 결과와, 0행이면 그 원인을 로그에 남긴다."""
+        dropped = self.task2_rec.abort()
+        if dropped is not None:
+            self.log(f"작업 2 물체 {dropped}: 중단되어 CSV에 저장하지 않음")
+        saved = len(self.task2_rec.saved_ids)
+        seen = self.task2_rec.jobs_seen
+        self.log(f"작업 2 CSV 저장 {saved}행 → {TASK2_CSV_PATH.name}")
+        if saved > 0 and (ok and saved == seen):
+            return
+        if seen == 0:
+            if ok or self.task2_order_seen:
+                self.log("CSV 0행 원인: 로봇이 JOB/JOB_DONE 메시지를 보내지 않음 → "
+                         "펜던트 DRL이 예전 버전일 가능성 "
+                         "(DART-Studio 프로젝트의 main.drl을 저장소 최신본으로 교체)")
+            else:
+                self.log(f"CSV 0행 원인: 이송 단계 전에 작업이 끝남 ({reason or '오류'})")
+        elif not ok:
+            self.log(f"CSV {saved}/{seen}행만 저장: 작업이 중단됨 ({reason})")
+        else:
+            self.log(f"CSV {saved}/{seen}행만 저장: 위 'CSV 저장 안 함' 로그의 원인을 확인하세요")
 
     def finish_task(self, ok, reason=""):
         if not self.busy:
@@ -1119,11 +1202,7 @@ class RobotUI(QWidget):
         state = STATE_DONE if ok else STATE_ERROR
         if self.current_task == 2:
             # 끝나지 않은 물체 작업은 CSV에 저장하지 않는다 (퀴즈2: 중단된 작업 저장 금지)
-            dropped = self.task2_rec.abort()
-            if dropped is not None:
-                self.log(f"작업 2 물체 {dropped}: 중단되어 CSV에 저장하지 않음")
-            saved = len(self.task2_rec.saved_ids)
-            self.log(f"작업 2 CSV 저장 {saved}행 → {TASK2_CSV_PATH.name}")
+            self._report_task2_csv(ok, reason)
         if ok:
             self.increment_task_count(self.current_task)
             self.poll_registers()
