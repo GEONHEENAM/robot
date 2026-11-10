@@ -25,13 +25,7 @@ from vision.gesture_logic import (  # noqa: E402
     AutoTaskGate,
     classify_frame,
 )
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MODEL_PATH = PROJECT_ROOT / "models" / "hand_landmarker.task"
-MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
-    "hand_landmarker/float16/latest/hand_landmarker.task"
-)
+from vision.hand_model import MODEL_PATH, MODEL_URL  # noqa: E402,F401
 
 CAMERA_INDEX = 0
 CAMERA_BACKEND = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY

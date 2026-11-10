@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from vision.gesture import MODEL_PATH, MODEL_URL  # noqa: E402
+from vision.hand_model import MODEL_PATH, MODEL_URL  # noqa: E402
 
 
 def main() -> int:
