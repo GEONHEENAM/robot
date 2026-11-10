@@ -8,7 +8,6 @@ import time
 import cv2
 import numpy as np
 
-
 # ========================= 직접 조정할 설정 =========================
 CAMERA_INDEX = 0
 CAMERA_BACKEND = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY

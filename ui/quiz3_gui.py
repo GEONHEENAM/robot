@@ -23,7 +23,7 @@ from pathlib import Path
 
 import cv2
 from pymodbus.client import ModbusTcpClient
-from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QImage, QPixmap
 from PyQt6.QtNetwork import QAbstractSocket, QTcpSocket
 from PyQt6.QtWidgets import (
