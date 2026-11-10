@@ -140,6 +140,24 @@ python -m robot_comm.sim_server --port 5020
 python ui\quiz3_gui.py
 ```
 
+### 작업 2 결과 CSV (퀴즈2 누적 기능)
+
+작업 2에서 물체 하나의 이송이 정상 종료될 때마다 `task2_height_result.csv`(저장소 루트)에 한 행씩 자동 추가된다.
+
+| 열 | 값 |
+|---|---|
+| `job_id`, `length_mm` | 물체 번호, 접촉 측정 Z (mm) |
+| `pick_*`, `place_*` | 실제 명령한 집기·놓기 목표점 X, Y, Z, Rx, Ry, Rz |
+| `start_time`, `end_time`, `duration_s` | 그 물체의 첫 `MoveJ Start` ~ 놓고 상승한 마지막 `MoveL 종료` (PC 수신 시각) |
+
+- 열 제목은 파일을 처음 만들 때만 쓴다. 이후 실행은 같은 파일에 이어 쓴다.
+- 이송 중 오류·연결 끊김·타임아웃으로 끝난 물체는 저장하지 않는다.
+- 시연·제출용으로 "3행"만 남기려면 실행 전에 기존 파일을 지우거나 옮겨 둔다.
+- 엑셀로 파일을 열어 둔 상태면 Windows에서 쓰기가 막혀 저장되지 않는다 (로그에 표시됨).
+- 예전 형식(열 제목이 다른) 파일이 있으면 `task2_height_result_old_날짜.csv`로 보관하고 새로 만든다.
+
+로봇 → PC 메시지 (작업 2, 물체마다): `JOB,id,length,pick6,place6` → 모션 메시지 → `JOB_DONE,id`
+
 ### Gesture (MediaPipe 손 스켈레톤 → 로봇 작업)
 
 처음 한 번: opencv-python을 지우고 모델을 받는다 (mediapipe는 opencv-contrib-python에 의존, 둘이 같이 있으면 cv2가 꼬임).

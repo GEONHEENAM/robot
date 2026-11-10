@@ -8,7 +8,9 @@
 [로봇 통신 프로토콜 - 예시, 실제 로봇 프로그램에 맞게 수정]
   UI → 로봇 : "TASK,1\n" / "TASK,2\n"
   로봇 → UI : "POS,x,y,z,j1,j2,j3,j4,j5,j6\n"   현재 좌표/관절값
-              "DATA,id,x,y,approach_z,measured_z\n" 작업2 측정 결과
+              "DATA,id,x,y,approach_z,measured_z\n" 작업2 측정 결과 (Modbus 기록)
+              "JOB,id,length,pick6,place6\n"       작업2 물체별 작업 정보 (퀴즈2 CSV)
+              "JOB_DONE,id\n"                      작업2 물체별 작업 정상 종료
               "CSV,v1,v2,...\n"                    일반 CSV 한 줄
               "DONE,1\n"                           작업 완료
               "ERROR,메시지\n"                    작업 오류
@@ -50,6 +52,12 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from robot_comm.task2_record import (  # noqa: E402
+    CSV_HEADER,
+    JobRecordError,
+    Task2Recorder,
+    append_row,
+)
 from vision.detect import (  # noqa: E402
     CAMERA_BACKEND,
     CAMERA_INDEX,
@@ -79,6 +87,9 @@ TASK2_Z_START = 10
 TASK2_Z_SIZE = 10
 TASK2_MEAS_COUNT = 3  # 작업 2 1회 실행의 측정 개수
 SCALE = 10            # Z축 높이의 0.1 단위 표현용
+
+# 퀴즈2 작업 결과 CSV (물체 1개 = 1행, 정상 종료한 작업만 자동 누적 저장)
+TASK2_CSV_PATH = PROJECT_ROOT / "task2_height_result.csv"
 
 REG_NAMES = {}
 for i in range(TASK_COUNT_SIZE):
@@ -294,7 +305,7 @@ class RobotUI(QWidget):
         self.mb_ok = False
         self.robot = QTcpSocket(self)
         self.robot_ready = False
-        self.rx_buf = ""
+        self.rx_buf = b""     # 바이트로 모은 뒤 줄 단위로 디코딩 (한글 바이트가 잘려 와도 안전)
         self.busy = False
         self.vision_thread: VisionThread | None = None
         self.vision_pixmap: QPixmap | None = None
@@ -310,6 +321,7 @@ class RobotUI(QWidget):
         self.gesture_last_label = "init"
         self.current_task = 0
         self.task2_base = 0    # 이번 작업 2 실행이 기록할 첫 Z 칸 (0 = 주소 10)
+        self.task2_rec = Task2Recorder()   # 퀴즈2 작업별 CSV 기록
         self.csv_header_set = False
 
         self._build_ui()
@@ -891,6 +903,7 @@ class RobotUI(QWidget):
 
     def on_robot_connected(self):
         self.robot_ready = False
+        self.rx_buf = b""     # 이전 연결에서 남은 조각 제거
         self.set_conn_label(self.rb_status, True, "● READY 대기")
         self.rb_btn.setText("해제")
         self.rb_ip.setEnabled(False)
@@ -916,16 +929,23 @@ class RobotUI(QWidget):
         self.update_buttons()
 
     def on_robot_ready_read(self):
-        self.rx_buf += bytes(self.robot.readAll()).decode(errors="ignore")
-        while "\n" in self.rx_buf:
-            line, self.rx_buf = self.rx_buf.split("\n", 1)
-            line = line.strip()
+        # "MoveL 종료" 같은 한글은 UTF-8로 3바이트라 TCP 조각 경계에서 잘릴 수 있다.
+        # 조각마다 decode하면 글자가 깨지므로, 바이트로 모아 줄바꿈 단위로 자른 뒤 디코딩한다.
+        self.rx_buf += bytes(self.robot.readAll())
+        while b"\n" in self.rx_buf:
+            raw, self.rx_buf = self.rx_buf.split(b"\n", 1)
+            line = raw.decode("utf-8", errors="replace").strip()
             if line:
                 self.handle_robot_line(line)
 
     def handle_robot_line(self, line):
+        now = datetime.datetime.now()     # PC 수신 시각 (퀴즈2 시작·종료 시각 기준)
         cmd, _, body = line.partition(",")
         cmd = cmd.upper()
+
+        recording = self.busy and self.current_task == 2
+        if recording:
+            self.task2_rec.on_line(line, now)
 
         if cmd == "POS":
             try:
@@ -953,12 +973,38 @@ class RobotUI(QWidget):
                 self.log(f"DATA 형식 오류: {line}")
                 return
 
-            if self.busy and self.current_task == 2:
-                self.append_csv_row(cells)
+            if recording:
+                # 측정값은 Modbus에만 기록. CSV 행은 작업이 정상 종료(JOB_DONE)된 뒤 추가한다.
+                self.log(f"작업 2 측정 #{job_id}: {measured_z:.2f} mm")
                 address = TASK2_Z_START + self.task2_base + job_id - 1
                 self.write_regs(address, [to_reg(measured_z)])
             else:
                 self.log(f"작업 2 외 DATA 수신: {line}")
+
+        elif cmd == "JOB":
+            if not recording:
+                self.log(f"작업 2 외 JOB 수신: {line}")
+                return
+            try:
+                warning = self.task2_rec.start_job(body)
+            except JobRecordError as e:
+                self.log(f"JOB 무시: {e}")
+                return
+            if warning:
+                self.log(warning)
+            self.log(f"작업 2 물체 {self.task2_rec.job.job_id} 시작 (길이 "
+                     f"{self.task2_rec.job.length:.2f} mm)")
+
+        elif cmd == "JOB_DONE":
+            if not recording:
+                self.log(f"작업 2 외 JOB_DONE 수신: {line}")
+                return
+            try:
+                row = self.task2_rec.finish_job(body)
+            except JobRecordError as e:
+                self.log(f"CSV 저장 안 함: {e}")
+                return
+            self.save_task2_row(row)
 
         elif cmd == "CSV":
             self.append_csv_row(body.split(","))
@@ -1025,8 +1071,9 @@ class RobotUI(QWidget):
         self.set_task_state(STATE_BUSY)
 
         if n == 2:
+            self.task2_rec.reset()
             self.clear_csv()
-            self.append_csv_row(["job_id", "x", "y", "approach_z", "measured_z"])
+            self.append_csv_row(CSV_HEADER)          # 화면 표의 열 제목 (이번 실행 결과만 표시)
             self.log(f"작업 2 측정값 기록 위치: 주소 {TASK2_Z_START + self.task2_base}~"
                      f"{TASK2_Z_START + self.task2_base + TASK2_MEAS_COUNT - 1}")
 
@@ -1043,6 +1090,13 @@ class RobotUI(QWidget):
             return
         self.task_timer.stop()
         state = STATE_DONE if ok else STATE_ERROR
+        if self.current_task == 2:
+            # 끝나지 않은 물체 작업은 CSV에 저장하지 않는다 (퀴즈2: 중단된 작업 저장 금지)
+            dropped = self.task2_rec.abort()
+            if dropped is not None:
+                self.log(f"작업 2 물체 {dropped}: 중단되어 CSV에 저장하지 않음")
+            saved = len(self.task2_rec.saved_ids)
+            self.log(f"작업 2 CSV 저장 {saved}행 → {TASK2_CSV_PATH.name}")
         if ok:
             self.increment_task_count(self.current_task)
             self.poll_registers()
@@ -1057,6 +1111,19 @@ class RobotUI(QWidget):
         self.csv_table.setRowCount(0)
         self.csv_table.setColumnCount(0)
         self.csv_header_set = False
+
+    def save_task2_row(self, row):
+        """정상 종료한 작업 2 물체 1개의 결과를 CSV 파일에 누적하고 표에 표시한다."""
+        try:
+            backup = append_row(TASK2_CSV_PATH, row)
+        except OSError as e:
+            # 엑셀로 파일을 열어 두면 Windows에서 쓰기가 막힌다
+            self.log(f"CSV 파일 쓰기 실패 ({TASK2_CSV_PATH.name}): {e} — 엑셀에서 열려 있는지 확인")
+            return
+        if backup is not None:
+            self.log(f"기존 CSV 열 제목이 달라 {backup.name}(으)로 보관하고 새로 만듦")
+        self.append_csv_row(row)
+        self.log(f"작업 2 물체 {row[0]} CSV 저장: 소요 {row[-1]}초")
 
     def append_csv_row(self, cells):
         cells = [c.strip() for c in cells]
