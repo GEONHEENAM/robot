@@ -1,0 +1,218 @@
+# 퀴즈5 DRL (드라이버: drl/ROBOT_CONTROL_DRL.drl 퀴즈4 버전에서 정리)
+#
+#  - 소켓(포트 9000): PC 명령 수신 + 로그 전송만 한다.
+#  - 로봇 현재 좌표는 보내지 않는다. PC가 로봇 Modbus(포트 502, 레지스터 400~405 / 270~275)로 직접 읽는다.
+#  - 퀴즈2(높이 측정)는 구현하지 않음.
+#
+#  PC -> 로봇 : TASK,1   작업1 (퀴즈1 Pick & Place)
+#               TASK,R1  랜덤 동작 (퀴즈4)
+#               TASK,A   YOLO 판정 A -> 작업물을 왼쪽(A 영역)으로
+#               TASK,B   YOLO 판정 B -> 작업물을 오른쪽(B 영역)으로
+#               END
+#  로봇 -> PC : READY / 로그 문자열 / DONE,1 / DONE,3 / DONE,4(A) / DONE,5(B) / UNKNOWN ...
+
+# Socket params
+PORT_NUM = 9000
+
+# Home position
+HOME = posj(-90, 0, -90, 0, -90, 0)
+
+# Speed Params
+VJ, AJ = 30, 60
+VL, AL = 100, 200
+VEL, ACC = 60, 60
+
+# 상대 이동 (퀴즈1 값)
+Z_UP = posx(0, 0, 90, 0, 0, 0)
+Z_UP_PLACE = posx(0, 0, 95, 0, 0, 0)
+Z_DN = posx(0, 0, -90, 0, 0, 0)
+Z_DN_PLACE = posx(0, 0, -85, 0, 0, 0)
+
+# ---- 퀴즈5 A/B 분류 위치 (DR_BASE, Z=100 상공) ----
+# !! 시연 전에 티칭으로 확인할 것: 로봇 정면에서 본 왼쪽/오른쪽이 X 부호와 맞는지 !!
+SORT_PICK_UP = posx(0, 500, 100, 0, -180, 0)       # 작업물 놓아 두는 가운데 자리
+AREA_A_UP = posx(200, 500, 100, 0, -180, 0)        # A = 왼쪽
+AREA_B_UP = posx(-200, 500, 100, 0, -180, 0)       # B = 오른쪽
+
+# Connection
+sock = None
+rx_buf = ""
+
+def wait_client():
+    global sock
+    sock = server_socket_open(PORT_NUM)
+    tp_log("[SOCK] PC client connected")
+
+def send_msg(msg):
+    res = server_socket_write(sock, (msg + "\n").encode())
+    if res < 0:
+        tp_log("[SOCK] send failed({0}) : {1}".format(res, msg))
+    return res
+
+def read_line():
+    global rx_buf
+    while True:
+        idx = rx_buf.find("\n")
+        if idx >= 0:
+            line = rx_buf[:idx].strip()
+            rx_buf = rx_buf[idx + 1:]
+            if len(line) > 0:
+                return line
+            continue
+
+        res, data = server_socket_read(sock)
+        if res < 0:
+            tp_log("[SOCK] read failed({0})".format(res))
+            return None
+
+        rx_buf += data.decode()
+
+
+# Gripper (지정 코드 그대로: DO1 = 닫기, DO2 = 열기)
+def _gripper_close_raw():
+    set_tool_digital_output(-1)
+    set_tool_digital_output(-2)
+    wait(1)
+    set_tool_digital_output(1)
+
+def _gripper_open_raw():
+    set_tool_digital_output(-1)
+    set_tool_digital_output(-2)
+    wait(1)
+    set_tool_digital_output(2)
+
+GRIP_SETTLE = 0.5   # 출력 후 그리퍼가 다 닫히고/열릴 때까지 기다리는 시간
+
+def grip_on():
+    send_msg("Gripper ON")
+    _gripper_close_raw()
+    wait(GRIP_SETTLE)
+
+def grip_off():
+    send_msg("Gripper OFF")
+    _gripper_open_raw()
+    wait(GRIP_SETTLE)
+
+
+# Motion (퀴즈1 로그 형식: 실행 직전 Start, 이동 완료 후 종료)
+def move_j(pos, v = VJ, a = AJ):
+    send_msg("MoveJ Start")
+    movej(pos, v, a)
+    send_msg("MoveJ 종료")
+
+def move_jx(pos, v = VJ, a = AJ):
+    send_msg("MoveJ Start")
+    movejx(pos, v, a, sol=SOL)
+    send_msg("MoveJ 종료")
+
+def move_l(pos, v = VL, a = AL):
+    send_msg("MoveL Start")
+    movel(pos, v, a)
+    send_msg("MoveL 종료")
+
+def move_l_REL(dist, v = VEL, a = ACC):
+    send_msg("MoveL Start")
+    movel(dist, mod=DR_MV_MOD_REL, v=v, a=a)
+    send_msg("MoveL 종료")
+
+
+# Task 1 : Pick and Place (퀴즈1)
+T1_HOME_1   = posx(0, 500, 100, 0, 180, 0)
+T1_HOME_2   = posx(0, 700, 100, 0, 180, 0)
+
+T1_PICK_UP_1  = posj(-111.14, -30.82, -86.17, 0, -63.02, -111.14)
+T1_PLACE_UP_1 = posj(-67.53, -30.82, -86.17, 0, -63.02, -67.53)
+
+T1_PICK_UP_2  = posj(-105.45, -61.2, -30.66, 0, -88.14, -105.45)
+T1_PLACE_UP_2 = posj(-73.56, -61.2, -30.66, 0, -88.14, -73.56)
+
+def task1_pick_place(home, pick, place):
+    send_msg("MOVE HOME")
+    move_l(home, 100, 80)
+    move_j(pick, VEL, ACC)
+    move_l_REL(Z_DN)
+    grip_on()
+    move_l_REL(Z_UP)
+    move_j(place, VEL, ACC)
+    move_l_REL(Z_DN_PLACE)
+    grip_off()
+    move_l_REL(Z_UP_PLACE)
+    move_l(home, VEL, ACC)
+
+def TASK1():
+    grip_off()
+    task1_pick_place(T1_HOME_1, T1_PICK_UP_1, T1_PLACE_UP_1)
+    task1_pick_place(T1_HOME_2, T1_PICK_UP_2, T1_PLACE_UP_2)
+    send_msg("All Tasks Finished")
+
+
+# Task Random 1 (퀴즈4)
+def TaskRand1():
+    move_j(HOME)
+    send_msg("Why??")
+    for i in range(2):
+        movej(posj(0, 0, 0, 30, 0, 0), v=VJ, a=AJ, mod=DR_MV_MOD_REL)
+        movej(posj(0, 0, 0, -30, 0, 0), v=VJ, a=AJ, mod=DR_MV_MOD_REL)
+    move_j(HOME)
+
+
+# Task A / B (퀴즈5): 가운데 작업물을 집어 A(왼쪽) 또는 B(오른쪽)에 놓는다
+def SORT(name, area_up):
+    send_msg("SORT Start,{0}".format(name))
+    grip_off()
+    move_jx(SORT_PICK_UP)
+    move_l_REL(Z_DN)
+    grip_on()
+    move_l_REL(Z_UP)
+    move_jx(area_up)
+    move_l_REL(Z_DN_PLACE)
+    grip_off()
+    move_l(area_up)
+    move_j(HOME)
+    send_msg("SORT End,{0}".format(name))
+
+
+# Main: server open - wait for order - action
+movej(HOME, v=VJ, a=AJ)
+_gripper_open_raw()
+SOL = get_current_solution_space()
+
+wait_client()
+send_msg("READY")
+
+while True:
+    cmd = read_line()
+
+    if cmd is None:
+        tp_log("[SOCK] client disconnected")
+        break
+
+    if cmd == "TASK,1":
+        send_msg("TASK 1 Accepted")
+        TASK1()
+        send_msg("DONE,1")
+
+    elif cmd == "TASK,R1":
+        send_msg("TASK Rand 1 Accepted")
+        TaskRand1()
+        send_msg("DONE,3")
+
+    elif cmd == "TASK,A":
+        send_msg("TASK A Accepted")
+        SORT("A", AREA_A_UP)
+        send_msg("DONE,4")
+
+    elif cmd == "TASK,B":
+        send_msg("TASK B Accepted")
+        SORT("B", AREA_B_UP)
+        send_msg("DONE,5")
+
+    elif cmd == "END":
+        send_msg("END Received")
+        break
+
+    else:
+        send_msg("UNKNOWN " + cmd)
+
+server_socket_close(sock)
+tp_log("[MAIN] program end")
