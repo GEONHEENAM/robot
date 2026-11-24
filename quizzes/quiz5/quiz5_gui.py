@@ -213,6 +213,7 @@ class Quiz5UI(QWidget):
 
         self.set_move_state("대기", "#6b7280")
         self.update_buttons()
+        self.refresh_photo_count()
 
     # ---------------- UI 구성 ----------------
     def _build_ui(self):
@@ -288,7 +289,9 @@ class Quiz5UI(QWidget):
         self.btn_yolo.setStyleSheet("font: bold 14px;")
 
         f.addRow("Yolo 폴더", folder_row)
+        self.photo_count_label = QLabel("-")
         f.addRow("사진 묶음", self.yolo_dataset)
+        f.addRow("찾은 사진", self.photo_count_label)
         f.addRow("검사 사진 수", self.yolo_n)
         f.addRow("CONF", self.yolo_conf)
         f.addRow("IMGSZ", self.yolo_imgsz)
@@ -420,6 +423,8 @@ class Quiz5UI(QWidget):
         self.rm_btn.clicked.connect(self.toggle_robot_modbus)
         self.btn_yolo.clicked.connect(self.start_yolo)
         self.btn_yolo_root.clicked.connect(self.pick_yolo_root)
+        self.yolo_root.editingFinished.connect(self.refresh_photo_count)
+        self.yolo_dataset.currentTextChanged.connect(self.refresh_photo_count)
         for d, b in self.btn_move.items():
             b.clicked.connect(lambda _=False, d=d: self.start_move(d))
         self.btn_log_save.clicked.connect(self.save_log)
@@ -720,16 +725,32 @@ class Quiz5UI(QWidget):
         path = QFileDialog.getExistingDirectory(self, "Yolo 폴더 선택", self.yolo_root.text())
         if path:
             self.yolo_root.setText(path)
+            self.refresh_photo_count()
+
+    def _photo_folder(self):
+        text = self.yolo_root.text().strip().strip('"')
+        return yj.resolve_folder(Path(text), self.yolo_dataset.currentText())
+
+    def refresh_photo_count(self):
+        """경로·사진 묶음이 바뀔 때마다 실제로 찾은 사진 수를 표시한다."""
+        _, folder = self._photo_folder()
+        count = len(yj.list_photos(folder))
+        ok = count >= self.yolo_n.value()
+        self.photo_count_label.setText(f"{count}장  ({folder})")
+        self.photo_count_label.setStyleSheet(f"color: {'#16a34a' if ok else '#dc2626'};")
+        self.photo_count_label.setToolTip("" if count else yj.diagnose(folder))
 
     def start_yolo(self):
         if self.yolo_thread is not None or self.moving is not None:
             return
-        root = Path(self.yolo_root.text().strip())
-        folder = root / "input_images" / self.yolo_dataset.currentText()
+        root, folder = self._photo_folder()
         photos = yj.list_photos(folder)
+        self.refresh_photo_count()
         n = self.yolo_n.value()
         if len(photos) < n:
             self.log(f"YOLO: 사진이 부족합니다 ({folder}에 {len(photos)}장, 필요 {n}장)")
+            if not photos:
+                self.log(f"YOLO: {yj.diagnose(folder)}")
             return
         conf, imgsz = self.yolo_conf.value(), int(self.yolo_imgsz.currentText())
         mode, threshold = self.yolo_prep.currentText(), self.yolo_threshold.value()

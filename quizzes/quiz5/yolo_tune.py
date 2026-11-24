@@ -41,10 +41,11 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path("tune_result.csv"))
     args = ap.parse_args()
 
-    folder = args.root / "input_images" / args.dataset
+    args.root, folder = yj.resolve_folder(args.root, args.dataset)
     photos = yj.list_photos(folder)
+    print(f"입력 폴더: {folder} | 사진 {len(photos)}장")
     if not photos:
-        print(f"사진이 없습니다: {folder}")
+        print(yj.diagnose(folder))
         return 1
     labels = load_labels(args.labels) if args.labels else None
     names = [p.relative_to(folder).as_posix() for p in photos]

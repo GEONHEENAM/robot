@@ -14,6 +14,7 @@ GUI(quiz5_gui.py)가 judge()를 불러 쓰고, 단독 실행도 된다.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -24,7 +25,9 @@ import numpy as np
 
 # ========================= 설정 =========================
 # Yolo 실습 폴더 (input_images/, yolo11n.pt 가 있는 곳). GUI에서 바꿀 수 있다.
-DEFAULT_ROOT = Path.home() / "OneDrive" / "바탕 화면" / "Yolo"
+# PC마다 바탕 화면 위치가 달라서 (OneDrive 사용 여부, 탐색기에 "바탕 화면"으로 보여도
+# 실제 폴더 이름은 "Desktop"인 경우 등) 아래 후보 중 실제로 있는 곳을 쓴다.
+# 환경 변수 YOLO_ROOT를 지정하면 그것을 가장 먼저 쓴다.
 MODEL_NAME = "yolo11n.pt"
 
 # yolo_tune.py로 찾은 최적값을 여기에 적어 둔다 (GUI 기본값으로 쓰임)
@@ -35,7 +38,50 @@ PREPROCESS = "original"
 DOG_CLASS_ID = 16
 PREPROCESS_CHOICES = ("original", "bright", "contrast")
 DATASETS = ("tune", "test", "valid")
-IMAGE_EXT = {".jpg", ".jpeg", ".png"}
+# OpenCV(imdecode)가 읽을 수 있는 형식. 웹에서 받은 사진은 webp/jfif인 경우가 많다.
+IMAGE_EXT = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+
+
+def _windows_desktop() -> Path | None:
+    """Windows가 실제로 쓰는 바탕 화면 경로 (OneDrive 백업·폴더 이동까지 반영)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        # CSIDL_DESKTOPDIRECTORY = 0x10
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf) == 0:
+            return Path(buf.value)
+    except Exception:
+        pass
+    return None
+
+
+def root_candidates() -> list[Path]:
+    home = Path.home()
+    found = [Path(os.environ["YOLO_ROOT"])] if os.environ.get("YOLO_ROOT") else []
+    desktop = _windows_desktop()
+    if desktop is not None:
+        found.append(desktop / "Yolo")
+    for base in (home / "OneDrive" / "바탕 화면", home / "OneDrive" / "Desktop",
+                 home / "바탕 화면", home / "Desktop"):
+        found.append(base / "Yolo")
+    found.append(Path(__file__).resolve().parent / "Yolo")
+    return found
+
+
+def find_default_root() -> Path:
+    """input_images 폴더가 있는 첫 후보. 하나도 없으면 첫 후보를 그대로 돌려준다."""
+    candidates = root_candidates()
+    for c in candidates:
+        if (c / "input_images").is_dir():
+            return c
+    return candidates[0]
+
+
+DEFAULT_ROOT = find_default_root()
 
 
 @dataclass
@@ -66,8 +112,38 @@ class JudgeResult:
 
 
 # ========================= 공통 함수 =========================
+def resolve_folder(root: Path, dataset: str) -> tuple[Path, Path]:
+    """GUI/명령에서 받은 경로 -> (Yolo 폴더, 사진 폴더).
+
+    Yolo 폴더 대신 input_images 나 input_images\\valid 를 직접 골라도 동작하게 한다.
+    """
+    root = Path(root)
+    if root.name.lower() in DATASETS and root.parent.name.lower() == "input_images":
+        return root.parent.parent, root
+    if root.name.lower() == "input_images":
+        return root.parent, root / dataset
+    return root, root / "input_images" / dataset
+
+
+def diagnose(folder: Path) -> str:
+    """사진이 0장일 때 이유를 사람이 읽는 문장으로."""
+    if not folder.exists():
+        return f"폴더가 없습니다: {folder}"
+    if not folder.is_dir():
+        return f"폴더가 아닙니다: {folder}"
+    files = [p for p in folder.rglob("*") if p.is_file()]
+    if not files:
+        return (f"폴더는 있지만 파일이 0개입니다: {folder} "
+                "(OneDrive '온라인 전용'이면 '이 디바이스에 항상 유지'로 내려받기)")
+    exts: dict[str, int] = {}
+    for p in files:
+        exts[p.suffix.lower() or "(없음)"] = exts.get(p.suffix.lower() or "(없음)", 0) + 1
+    shown = ", ".join(f"{k} {v}개" for k, v in sorted(exts.items()))
+    return f"{folder} 안의 파일 확장자: {shown} (사진으로 인정: {sorted(IMAGE_EXT)})"
+
+
 def list_photos(folder: Path) -> list[Path]:
-    """하위 폴더까지 JPG/PNG를 파일 이름순으로."""
+    """하위 폴더까지 사진 파일을 파일 이름순으로."""
     if not folder.is_dir():
         return []
     return sorted(p for p in folder.rglob("*")
@@ -99,10 +175,12 @@ def load_model(root: Path):
     """ultralytics는 무거워서 실제로 쓸 때 import 한다."""
     from ultralytics import YOLO
 
-    path = Path(root) / MODEL_NAME
-    if not path.exists():
-        raise FileNotFoundError(f"모델 파일이 없습니다: {path}")
-    return YOLO(str(path))
+    root = Path(root)
+    for path in (root / MODEL_NAME, root.parent / MODEL_NAME, Path(MODEL_NAME)):
+        if path.exists():
+            return YOLO(str(path))
+    raise FileNotFoundError(f"모델 파일이 없습니다: {root / MODEL_NAME} "
+                            "(Yolo 폴더에 yolo11n.pt를 넣으세요)")
 
 
 def detect(model, image, conf, imgsz, mode):
@@ -254,11 +332,13 @@ def main() -> int:
     ap.add_argument("--modbus", default="", help="결과를 쓸 서버 host:port (예: 127.0.0.1:5020)")
     args = ap.parse_args()
 
-    folder = args.root / "input_images" / args.dataset
+    args.root, folder = resolve_folder(args.root, args.dataset)
     photos = list_photos(folder)
     print(f"입력 폴더: {folder} | 전체 사진 {len(photos)}장")
     if len(photos) < args.n:
         print(f"사진이 {args.n}장보다 적습니다 ({len(photos)}장).")
+        if not photos:
+            print(diagnose(folder))
         return 1
     if not 0 <= args.threshold <= 100 or not 0 < args.conf <= 1:
         print("기준은 0~100, CONF는 0~1 사이여야 합니다.")
