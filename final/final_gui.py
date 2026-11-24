@@ -18,14 +18,16 @@
   GUI → 로봇 : "TASK,1" / "TASK,2"         퀴즈1·퀴즈2 작업 (기존)
                "HOME"                      홈 자세로 이동          (추가)
                "PICK,x,y,angle,slot"       막대 집기 → slot 칸에 놓기 (추가)
-                                           x, y = 로봇 베이스 좌표(mm), angle = 막대 긴 축 각도(deg, -90~90)
+                                           x, y = 로봇 베이스 좌표(mm)
+                                           angle = 막대 긴 축 각도(deg, -90~90)
                                            slot = 놓기 칸 번호 1~3 (config.PLACE_SLOTS)
                "END"                       DRL 종료 (기존)
   로봇 → GUI : "READY"                     접속 직후 (기존)
                "POS,x,y,z,j1..j6"          현재 위치 (기존)
                "DONE,n"                    작업 완료: 1=작업1, 2=작업2, 3=PICK (3은 추가)
                "AT_HOME"                   홈 도착 = 카메라 촬영해도 되는 시점 (추가)
-                                           HOME 명령 끝, PICK 끝(DONE,3 직전), PICK 실패(ERROR 직후)에 온다
+                                           HOME 명령 끝, PICK 끝(DONE,3 직전),
+                                           PICK 실패(ERROR 직후)에 온다
                "ERROR,..."                 작업 실패 (기존)
                "DATA,..." / "ORDER,..."    작업2 측정값 (기존)
 """
@@ -35,7 +37,11 @@ import datetime
 import sys
 import time
 
+import config
 import cv2
+import stt
+from intent import is_cancel, is_confirm, parse
+from planner import make_plan, rematch
 from PyQt6.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QImage, QPixmap
 from PyQt6.QtNetwork import QAbstractSocket, QTcpSocket
@@ -64,10 +70,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-import config
-import stt
-from intent import is_cancel, is_confirm, parse
-from planner import make_plan, rematch
 from vision import (
     StickDetector,
     Undistorter,
@@ -79,7 +81,7 @@ from vision import (
 
 try:
     from pymodbus.client import ModbusTcpClient
-except ImportError:          # Modbus는 선택 기능이라 없어도 GUI는 동작
+except ImportError:  # Modbus는 선택 기능이라 없어도 GUI는 동작
     ModbusTcpClient = None
 
 # ========================= 설정 =========================
@@ -93,29 +95,46 @@ COMMANDS = {
     "TASK1": (1, 60_000),
     "TASK2": (2, 90_000),
     "PICK": (3, 60_000),
-    "HOME": (None, 30_000),   # HOME은 DONE 대신 AT_HOME으로 완료
+    "HOME": (None, 30_000),  # HOME은 DONE 대신 AT_HOME으로 완료
 }
 
-REG_NAMES = {0: "작업1 완료 횟수 (퀴즈1)", 1: "작업2 완료 횟수 (퀴즈2)",
-             2: "작업3 완료 횟수 (PICK)", 3: "작업4 완료 횟수 (정렬, 예정)"}
+REG_NAMES = {
+    0: "작업1 완료 횟수 (퀴즈1)",
+    1: "작업2 완료 횟수 (퀴즈2)",
+    2: "작업3 완료 횟수 (PICK)",
+    3: "작업4 완료 횟수 (정렬, 예정)",
+}
 for _i in range(4, 10):
     REG_NAMES[_i] = f"작업{_i + 1} 완료 횟수 (예비)"
 for _i in range(10, 20):
     REG_NAMES[_i] = f"측정값 #{_i - 9} (x10)"
 
-SNAP_SETTLE_S = 0.5        # AT_HOME 후 이만큼 지난 프레임으로 스냅샷 (진동·영상 지연 여유)
+SNAP_SETTLE_S = 0.5  # AT_HOME 후 이만큼 지난 프레임으로 스냅샷 (진동·영상 지연 여유)
 SNAP_PENDING_TIMEOUT_S = 120
 
-SORT_TASK_NO = 4           # 정렬 전체가 끝나면 Modbus 작업4 횟수 +1
-SNAP_MAX_AGE_S = 30        # 명령을 받았을 때 이보다 오래된 스냅샷이면 HOME 후 새로 찍는다
+SORT_TASK_NO = 4  # 정렬 전체가 끝나면 Modbus 작업4 횟수 +1
+SNAP_MAX_AGE_S = 30  # 명령을 받았을 때 이보다 오래된 스냅샷이면 HOME 후 새로 찍는다
 
 STATE_IDLE, STATE_BUSY, STATE_DONE, STATE_ERROR = 0, 1, 2, 3
 STATE_LISTEN, STATE_THINK, STATE_CONFIRM = 4, 5, 6
-STATE_TEXT = {STATE_IDLE: "대기", STATE_BUSY: "작업 중", STATE_DONE: "완료", STATE_ERROR: "오류",
-              STATE_LISTEN: "듣는 중", STATE_THINK: "인식 중", STATE_CONFIRM: "승인 대기"}
-STATE_COLOR = {STATE_IDLE: "#6b7280", STATE_BUSY: "#d97706",
-               STATE_DONE: "#16a34a", STATE_ERROR: "#dc2626",
-               STATE_LISTEN: "#2563eb", STATE_THINK: "#7c3aed", STATE_CONFIRM: "#0891b2"}
+STATE_TEXT = {
+    STATE_IDLE: "대기",
+    STATE_BUSY: "작업 중",
+    STATE_DONE: "완료",
+    STATE_ERROR: "오류",
+    STATE_LISTEN: "듣는 중",
+    STATE_THINK: "인식 중",
+    STATE_CONFIRM: "승인 대기",
+}
+STATE_COLOR = {
+    STATE_IDLE: "#6b7280",
+    STATE_BUSY: "#d97706",
+    STATE_DONE: "#16a34a",
+    STATE_ERROR: "#dc2626",
+    STATE_LISTEN: "#2563eb",
+    STATE_THINK: "#7c3aed",
+    STATE_CONFIRM: "#0891b2",
+}
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
@@ -131,6 +150,7 @@ def mb_call(fn, *args, **kw):
 # ========================= 카메라 스레드 =========================
 class CameraWorker(QThread):
     """프레임 읽기 + 막대 검출을 GUI 스레드 밖에서 수행한다."""
+
     frame_ready = pyqtSignal(object, object, object, float, float)  # frame, sticks, mask, 시각, fps
     status = pyqtSignal(str)
     mapper_ready = pyqtSignal(object)
@@ -145,7 +165,7 @@ class CameraWorker(QThread):
         self._running = False
 
     def set_params(self, params):
-        self.detector.params = params      # 참조 교체만 하므로 스레드 간 공유해도 안전
+        self.detector.params = params  # 참조 교체만 하므로 스레드 간 공유해도 안전
 
     def stop(self):
         self._running = False
@@ -192,7 +212,8 @@ class CameraWorker(QThread):
 # ========================= STT 스레드 =========================
 class SttLoadWorker(QThread):
     """Vosk 모델 로드는 몇 초 걸리므로 시작할 때 백그라운드에서 한 번만."""
-    loaded = pyqtSignal(object, str)    # recognizer 또는 None, 메시지
+
+    loaded = pyqtSignal(object, str)  # recognizer 또는 None, 메시지
 
     def run(self):
         try:
@@ -231,7 +252,7 @@ class MainWindow(QWidget):
         self.robot_ready = False
         self.rx_buf = ""
         self.busy = False
-        self.current = None            # 진행 중 명령 {kind, task_no, line, target, t0}
+        self.current = None  # 진행 중 명령 {kind, task_no, line, target, t0}
 
         # --- 카메라 / 검출 ---
         self.params = VisionParams.load()
@@ -239,19 +260,19 @@ class MainWindow(QWidget):
         self.mapper = None
         self.live_sticks = []
         self.live_ts = 0.0
-        self.snap_sticks = []           # 스냅샷 시점의 막대 목록 (선택·PICK은 이것 기준)
+        self.snap_sticks = []  # 스냅샷 시점의 막대 목록 (선택·PICK은 이것 기준)
         self.snap_ts = 0.0
-        self.selected = None            # 선택된 막대 (Stick)
-        self.scene_changed_ts = 0.0     # 로봇이 막대를 움직였을 수 있는 마지막 시각
-        self.at_home_ts = 0.0           # 마지막 AT_HOME 수신 시각
-        self.robot_at_home = False      # AT_HOME 이후 다른 동작 명령을 보내지 않았으면 True
-        self.pending_snap = False       # AT_HOME 뒤 자동 스냅샷 예약
+        self.selected = None  # 선택된 막대 (Stick)
+        self.scene_changed_ts = 0.0  # 로봇이 막대를 움직였을 수 있는 마지막 시각
+        self.at_home_ts = 0.0  # 마지막 AT_HOME 수신 시각
+        self.robot_at_home = False  # AT_HOME 이후 다른 동작 명령을 보내지 않았으면 True
+        self.pending_snap = False  # AT_HOME 뒤 자동 스냅샷 예약
         self.pending_since = 0.0
 
         # --- 음성/텍스트 명령 (5~6단계) ---
-        self.pending_intent = None      # 새 스냅샷을 기다리는 의도
-        self.plan = None                # 승인 대기 중인 실행 계획
-        self.seq = None                 # 실행 중인 계획 {plan, i, sent_t0, last_ok, abort}
+        self.pending_intent = None  # 새 스냅샷을 기다리는 의도
+        self.plan = None  # 승인 대기 중인 실행 계획
+        self.seq = None  # 실행 중인 계획 {plan, i, sent_t0, last_ok, abort}
         self.recognizer = None
         self.recorder = None
         self.stt_worker = None
@@ -272,10 +293,13 @@ class MainWindow(QWidget):
 
         self.set_task_state(STATE_IDLE)
         self.update_buttons()
-        self.log("프로그램 시작. 카메라 시작 → 로봇 연결 → [HOME 후 스냅샷] → 막대 선택 → 놓을 칸 선택 → 집기")
+        self.log(
+            "프로그램 시작. 카메라 시작 → 로봇 연결 → [HOME 후 스냅샷]"
+            " → 막대 선택 → 놓을 칸 선택 → 집기"
+        )
         self.log("음성/텍스트 명령: Space를 누른 채 말하기 또는 입력란에 문장 → [승인]")
 
-        QApplication.instance().installEventFilter(self)    # Space 누르고 말하기
+        QApplication.instance().installEventFilter(self)  # Space 누르고 말하기
         self.start_stt_loading()
 
     # =====================================================================
@@ -302,8 +326,14 @@ class MainWindow(QWidget):
         self.fps_label = QLabel("FPS -")
         self.calib_label = QLabel("좌표 변환: -")
         self.calib_label.setStyleSheet("font-weight:bold;")
-        for w in (QLabel("카메라 번호"), self.cam_index, self.cam_btn,
-                  QLabel("보기"), self.view_mode, self.btn_capture):
+        for w in (
+            QLabel("카메라 번호"),
+            self.cam_index,
+            self.cam_btn,
+            QLabel("보기"),
+            self.view_mode,
+            self.btn_capture,
+        ):
             cbar.addWidget(w)
         cbar.addStretch()
         cbar.addWidget(self.fps_label)
@@ -366,7 +396,9 @@ class MainWindow(QWidget):
         self.btn_listen.setMinimumHeight(36)
         self.stt_status = QLabel("STT: -")
         self.text_cmd = QLineEdit()
-        self.text_cmd.setPlaceholderText("예: 왼쪽 막대 오른쪽에 놔 / 길이 순서대로 정렬해 / 홈으로 가")
+        self.text_cmd.setPlaceholderText(
+            "예: 왼쪽 막대 오른쪽에 놔 / 길이 순서대로 정렬해 / 홈으로 가"
+        )
         self.btn_text_cmd = QPushButton("해석")
         self.lbl_heard = QLabel("인식: -")
         self.lbl_intent = QLabel("해석: -")
@@ -391,9 +423,13 @@ class MainWindow(QWidget):
         dv = QVBoxLayout(det_box)
         dh = QHBoxLayout()
         self.btn_home_snap = QPushButton("HOME 후 스냅샷")
-        self.btn_home_snap.setToolTip("로봇을 홈으로 보낸 뒤 AT_HOME을 받으면 자동으로 스냅샷 (권장)")
+        self.btn_home_snap.setToolTip(
+            "로봇을 홈으로 보낸 뒤 AT_HOME을 받으면 자동으로 스냅샷 (권장)"
+        )
         self.snap_btn = QPushButton("스냅샷")
-        self.snap_btn.setToolTip("현재 프레임의 검출 결과를 바로 고정한다. 로봇이 시야를 가리지 않을 때만")
+        self.snap_btn.setToolTip(
+            "현재 프레임의 검출 결과를 바로 고정한다. 로봇이 시야를 가리지 않을 때만"
+        )
         self.auto_snap_chk = QCheckBox("PICK 후 자동 스냅샷")
         self.auto_snap_chk.setChecked(True)
         self.snap_info = QLabel("스냅샷 없음")
@@ -403,7 +439,9 @@ class MainWindow(QWidget):
         dv.addLayout(dh)
         dv.addWidget(self.snap_info)
         self.det_table = QTableWidget(0, 6)
-        self.det_table.setHorizontalHeaderLabels(["#", "X (mm)", "Y (mm)", "각도 (°)", "길이 (mm)", "집기 영역"])
+        self.det_table.setHorizontalHeaderLabels(
+            ["#", "X (mm)", "Y (mm)", "각도 (°)", "길이 (mm)", "집기 영역"]
+        )
         self.det_table.verticalHeader().setVisible(False)
         self.det_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.det_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -446,7 +484,9 @@ class MainWindow(QWidget):
         pos_w = QWidget()
         ph = QHBoxLayout(pos_w)
         tcp_box, self.tcp_table = self._make_pos_table("TCP 좌표", ["X", "Y", "Z"], "위치 [mm]")
-        jnt_box, self.joint_table = self._make_pos_table("관절 각도", [f"J{i + 1}" for i in range(6)], "각도 [°]")
+        jnt_box, self.joint_table = self._make_pos_table(
+            "관절 각도", [f"J{i + 1}" for i in range(6)], "각도 [°]"
+        )
         ph.addWidget(tcp_box, 3)
         ph.addWidget(jnt_box, 6)
         tabs.addTab(pos_w, "로봇 위치")
@@ -462,7 +502,9 @@ class MainWindow(QWidget):
         hb.addStretch()
         hv.addLayout(hb)
         self.hist_table = QTableWidget(0, 6)
-        self.hist_table.setHorizontalHeaderLabels(["시각", "명령", "대상", "결과", "소요 (s)", "비고"])
+        self.hist_table.setHorizontalHeaderLabels(
+            ["시각", "명령", "대상", "결과", "소요 (s)", "비고"]
+        )
         self.hist_table.verticalHeader().setVisible(False)
         self.hist_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.hist_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -507,10 +549,16 @@ class MainWindow(QWidget):
         w = QWidget()
         g = QGridLayout(w)
         self.param_spins = {}
-        spec = [("H 하한", "h_low", 0, 179), ("H 상한", "h_high", 0, 179),
-                ("S 하한", "s_low", 0, 255), ("S 상한", "s_high", 0, 255),
-                ("V 하한", "v_low", 0, 255), ("V 상한", "v_high", 0, 255),
-                ("최소 면적 (px)", "min_area", 0, 200_000), ("블러", "blur", 1, 31)]
+        spec = [
+            ("H 하한", "h_low", 0, 179),
+            ("H 상한", "h_high", 0, 179),
+            ("S 하한", "s_low", 0, 255),
+            ("S 상한", "s_high", 0, 255),
+            ("V 하한", "v_low", 0, 255),
+            ("V 상한", "v_high", 0, 255),
+            ("최소 면적 (px)", "min_area", 0, 200_000),
+            ("블러", "blur", 1, 31),
+        ]
         for i, (label, name, lo, hi) in enumerate(spec):
             sp = QSpinBox()
             sp.setRange(lo, hi)
@@ -531,9 +579,11 @@ class MainWindow(QWidget):
         g.addWidget(self.invert_chk, 2, 2, 1, 2)
         g.addWidget(self.btn_param_save, 2, 4)
         g.addWidget(self.btn_param_default, 2, 5)
-        note = QLabel("· H 하한 > H 상한이면 빨강처럼 0/179를 넘나드는 범위로 처리\n"
-                      "· [보기: 마스크]로 바꾸면 흰색 = 막대로 인식된 영역\n"
-                      "· 저장하면 vision_params.json에 기록되고 vision.py 단독 실행과 공유")
+        note = QLabel(
+            "· H 하한 > H 상한이면 빨강처럼 0/179를 넘나드는 범위로 처리\n"
+            "· [보기: 마스크]로 바꾸면 흰색 = 막대로 인식된 영역\n"
+            "· 저장하면 vision_params.json에 기록되고 vision.py 단독 실행과 공유"
+        )
         note.setStyleSheet("color:#555;")
         g.addWidget(note, 3, 0, 1, 8)
         g.setRowStretch(4, 1)
@@ -652,7 +702,9 @@ class MainWindow(QWidget):
     def set_task_state(self, state):
         self.task_state.setText(STATE_TEXT[state])
         self.task_state.setStyleSheet(
-            f"background:{STATE_COLOR[state]}; color:white; font: bold 16px; padding:8px; border-radius:6px;")
+            f"background:{STATE_COLOR[state]}; color:white; font: bold 16px;"
+            " padding:8px; border-radius:6px;"
+        )
 
     def robot_connected(self):
         return self.robot.state() == QAbstractSocket.SocketState.ConnectedState
@@ -671,13 +723,19 @@ class MainWindow(QWidget):
 
         listening = self.recorder is not None and self.recorder.recording
         stt_free = self.stt_worker is None
-        self.btn_listen.setEnabled(self.recognizer is not None and stt_free and
-                                   (listening or (not self.busy and self.seq is None) or self.plan is not None))
+        self.btn_listen.setEnabled(
+            self.recognizer is not None
+            and stt_free
+            and (listening or (not self.busy and self.seq is None) or self.plan is not None)
+        )
         self.btn_text_cmd.setEnabled(stt_free)
         self.text_cmd.setEnabled(stt_free)
         self.btn_confirm.setEnabled(self.plan is not None and can_cmd)
-        self.btn_cancel.setEnabled(self.plan is not None or self.pending_intent is not None or
-                                   (self.seq is not None and not self.seq.get("abort")))
+        self.btn_cancel.setEnabled(
+            self.plan is not None
+            or self.pending_intent is not None
+            or (self.seq is not None and not self.seq.get("abort"))
+        )
         self.btn_capture.setEnabled(self.cam_worker is not None)
         self.rb_btn.setEnabled(not self.busy)
         self.mb_btn.setEnabled(ModbusTcpClient is not None and not self.busy)
@@ -747,16 +805,29 @@ class MainWindow(QWidget):
                     self.lbl_plan.setText("계획: 스냅샷을 찍지 못해 취소")
 
         base = mask if self.view_mode.currentIndex() == 1 else frame
-        info = [f"live sticks: {len(sticks)}",
-                f"snapshot: {len(self.snap_sticks)}" + ("" if self.snapshot_valid() or not self.snap_sticks
-                                                         else "  (STALE - take new snapshot)")]
+        info = [
+            f"live sticks: {len(sticks)}",
+            f"snapshot: {len(self.snap_sticks)}"
+            + (
+                ""
+                if self.snapshot_valid() or not self.snap_sticks
+                else "  (STALE - take new snapshot)"
+            ),
+        ]
         targets = []
-        if self.plan is not None:                       # 승인 대기 중인 계획
-            targets = [(st.stick, f"{k + 1}: -> P{st.slot}") for k, st in enumerate(self.plan.steps)]
-        elif self.seq is not None:                      # 실행 중인 계획의 남은 단계
+        if self.plan is not None:  # 승인 대기 중인 계획
+            targets = [
+                (st.stick, f"{k + 1}: -> P{st.slot}") for k, st in enumerate(self.plan.steps)
+            ]
+        elif self.seq is not None:  # 실행 중인 계획의 남은 단계
             steps = self.seq["plan"].steps
-            targets = [(steps[k].stick, f"{k + 1}: -> P{steps[k].slot}") for k in range(self.seq["i"], len(steps))]
-        img = draw_detections(base, sticks, self.mapper, target=self.selected, info_lines=info, targets=targets)
+            targets = [
+                (steps[k].stick, f"{k + 1}: -> P{steps[k].slot}")
+                for k in range(self.seq["i"], len(steps))
+            ]
+        img = draw_detections(
+            base, sticks, self.mapper, target=self.selected, info_lines=info, targets=targets
+        )
         self._show_image(img)
         self.fps_label.setText(f"FPS {fps:.1f}")
 
@@ -764,8 +835,11 @@ class MainWindow(QWidget):
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         h, w = rgb.shape[:2]
         qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
-        pix = QPixmap.fromImage(qimg).scaled(self.view.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                                             Qt.TransformationMode.SmoothTransformation)
+        pix = QPixmap.fromImage(qimg).scaled(
+            self.view.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
         self.view.setPixmap(pix)
 
     def save_frame(self):
@@ -780,7 +854,9 @@ class MainWindow(QWidget):
     # ---------------- 검출 파라미터 ----------------
     def current_params(self):
         vals = {name: sp.value() for name, sp in self.param_spins.items()}
-        return VisionParams(min_aspect=self.aspect_spin.value(), invert=self.invert_chk.isChecked(), **vals)
+        return VisionParams(
+            min_aspect=self.aspect_spin.value(), invert=self.invert_chk.isChecked(), **vals
+        )
 
     def on_params_changed(self, *_):
         self.params = self.current_params()
@@ -829,10 +905,23 @@ class MainWindow(QWidget):
         self.det_table.setRowCount(len(self.snap_sticks))
         for r, s in enumerate(self.snap_sticks):
             if s.has_robot_coords:
-                cells = [f"{s.idx}", f"{s.x:.1f}", f"{s.y:.1f}", f"{s.angle:+.1f}", f"{s.length:.1f}",
-                         "O" if s.in_pick_zone else "X"]
+                cells = [
+                    f"{s.idx}",
+                    f"{s.x:.1f}",
+                    f"{s.y:.1f}",
+                    f"{s.angle:+.1f}",
+                    f"{s.length:.1f}",
+                    "O" if s.in_pick_zone else "X",
+                ]
             else:
-                cells = [f"{s.idx}", "-", "-", f"{s.angle_px:+.1f} (px)", f"{s.length_px:.0f} (px)", "-"]
+                cells = [
+                    f"{s.idx}",
+                    "-",
+                    "-",
+                    f"{s.angle_px:+.1f} (px)",
+                    f"{s.length_px:.0f} (px)",
+                    "-",
+                ]
             for c, v in enumerate(cells):
                 it = QTableWidgetItem(v)
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -840,7 +929,9 @@ class MainWindow(QWidget):
                     it.setForeground(QBrush(QColor("#9ca3af")))
                 self.det_table.setItem(r, c, it)
         stamp = datetime.datetime.fromtimestamp(self.snap_ts).strftime("%H:%M:%S")
-        self.snap_info.setText(f"{len(self.snap_sticks)}개 검출  ({stamp}{', 자동' if auto else ''})")
+        self.snap_info.setText(
+            f"{len(self.snap_sticks)}개 검출  ({stamp}{', 자동' if auto else ''})"
+        )
         self.log(f"{'자동 ' if auto else ''}스냅샷: 막대 {len(self.snap_sticks)}개")
         self.update_buttons()
 
@@ -874,11 +965,17 @@ class MainWindow(QWidget):
             self.log(f"막대 #{s.idx}가 집기 영역 밖에 있음 ({s.x:.0f}, {s.y:.0f})")
             return
         if self.mapper.is_dummy and not self.robot_is_local():
-            self.log("임시 변환 상태에서는 실제 로봇으로 PICK을 보낼 수 없음 (3단계 캘리브레이션 후 사용)")
+            self.log(
+                "임시 변환 상태에서는 실제 로봇으로 PICK을 보낼 수 없음"
+                " (3단계 캘리브레이션 후 사용)"
+            )
             return
         slot = self.dest_combo.currentData()
         line = f"PICK,{s.x:.1f},{s.y:.1f},{s.angle:.1f},{slot}"
-        if self.send_command("PICK", line, target=f"막대 #{s.idx} → P{slot}") and self.auto_snap_chk.isChecked():
+        if (
+            self.send_command("PICK", line, target=f"막대 #{s.idx} → P{slot}")
+            and self.auto_snap_chk.isChecked()
+        ):
             # DRL은 PICK이 끝나면(성공·실패 모두) 홈으로 돌아가 AT_HOME을 보낸다 → 그 뒤 자동 스냅샷
             self.pending_snap = True
             self.pending_since = self.current["t0"]
@@ -893,7 +990,13 @@ class MainWindow(QWidget):
         task_no, timeout_ms = COMMANDS[kind]
         self.busy = True
         self.robot_at_home = False
-        self.current = {"kind": kind, "task_no": task_no, "line": line, "target": target, "t0": time.time()}
+        self.current = {
+            "kind": kind,
+            "task_no": task_no,
+            "line": line,
+            "target": target,
+            "t0": time.time(),
+        }
         self.base_xyz, self.base_joint = self.prev_xyz, self.prev_joint
         self.robot.write((line + "\n").encode())
         self.robot.flush()
@@ -912,7 +1015,8 @@ class MainWindow(QWidget):
         elapsed = time.time() - cur["t0"]
         if cur["kind"] != "HOME":
             # 막대가 움직였을 수 있음 → 그 전에 찍은 스냅샷은 무효.
-            # 이번 명령 중에 AT_HOME을 받았다면 그때 이미 장면 변화가 끝났으므로 그 시각을 기준으로 한다
+            # 이번 명령 중에 AT_HOME을 받았다면 그때 이미 장면 변화가 끝났으므로
+            # 그 시각을 기준으로 한다
             # (PICK 후 자동 스냅샷은 AT_HOME 뒤, DONE 전에 찍히기 때문)
             self.scene_changed_ts = self.at_home_ts if self.at_home_ts >= cur["t0"] else time.time()
         if ok and cur["task_no"] and self.mb_ok:
@@ -945,8 +1049,14 @@ class MainWindow(QWidget):
     def add_history(self, cur, ok, reason, elapsed):
         r = self.hist_table.rowCount()
         self.hist_table.insertRow(r)
-        cells = [datetime.datetime.fromtimestamp(cur["t0"]).strftime("%H:%M:%S"),
-                 cur["line"], cur["target"], "성공" if ok else "실패", f"{elapsed:.1f}", reason]
+        cells = [
+            datetime.datetime.fromtimestamp(cur["t0"]).strftime("%H:%M:%S"),
+            cur["line"],
+            cur["target"],
+            "성공" if ok else "실패",
+            f"{elapsed:.1f}",
+            reason,
+        ]
         for c, v in enumerate(cells):
             it = QTableWidgetItem(v)
             if c == 3:
@@ -1012,25 +1122,28 @@ class MainWindow(QWidget):
         self.lbl_intent.setText(f"해석: {intent.describe()}")
         self.log(f"해석: {intent.describe()}")
 
-        if intent.action == "HOME":           # 홈 이동은 위험이 적어 승인 없이 바로 실행
+        if intent.action == "HOME":  # 홈 이동은 위험이 적어 승인 없이 바로 실행
             self.lbl_plan.setText("계획: 홈으로 이동 (바로 실행)")
             self.send_command("HOME", "HOME", target=f"{source} 명령")
             return
 
         # 4) 판단에 쓸 스냅샷: 충분히 최근이고 로봇이 홈에 있을 때 찍은 것이면 그대로, 아니면 새로
-        fresh = (self.snapshot_valid() and time.time() - self.snap_ts < SNAP_MAX_AGE_S and
-                 (self.robot_at_home or not self.robot_connected()))
+        fresh = (
+            self.snapshot_valid()
+            and time.time() - self.snap_ts < SNAP_MAX_AGE_S
+            and (self.robot_at_home or not self.robot_connected())
+        )
         if fresh:
             self.plan_and_confirm(intent)
         elif self.robot_connected() and self.robot_ready and self.cam_worker is not None:
             self.pending_intent = intent
             self.lbl_plan.setText("계획: 로봇을 홈으로 보내고 새 스냅샷을 찍는 중...")
             self.on_home_snapshot()
-            if not self.busy:                 # HOME 전송 실패
+            if not self.busy:  # HOME 전송 실패
                 self.pending_intent = None
                 self.lbl_plan.setText("계획: HOME 전송 실패")
         elif self.cam_worker is not None and self.live_ts:
-            self.take_snapshot()              # 로봇 미연결(테스트): 지금 화면으로 판단
+            self.take_snapshot()  # 로봇 미연결(테스트): 지금 화면으로 판단
             self.plan_and_confirm(intent)
         else:
             self.lbl_plan.setText("계획 불가: 카메라가 꺼져 있음")
@@ -1048,7 +1161,9 @@ class MainWindow(QWidget):
         self.plan = res.plan
         self.plan_snap_ts = self.snap_ts
         notes = ("  / 주의: " + "; ".join(res.plan.notes)) if res.plan.notes else ""
-        self.lbl_plan.setText(f"계획: {res.plan.summary}{notes}\n→ [승인] 또는 '실행'이라고 말하기 / 취소")
+        self.lbl_plan.setText(
+            f"계획: {res.plan.summary}{notes}\n→ [승인] 또는 '실행'이라고 말하기 / 취소"
+        )
         self.log(f"계획: {res.plan.summary}{notes}")
         self.set_task_state(STATE_CONFIRM)
         self.update_buttons()
@@ -1067,11 +1182,20 @@ class MainWindow(QWidget):
             self.update_buttons()
             return
         if self.mapper is None or (self.mapper.is_dummy and not self.robot_is_local()):
-            self.log("임시 변환 상태에서는 실제 로봇으로 PICK을 보낼 수 없음 (3단계 캘리브레이션 후 사용)")
+            self.log(
+                "임시 변환 상태에서는 실제 로봇으로 PICK을 보낼 수 없음"
+                " (3단계 캘리브레이션 후 사용)"
+            )
             return
         self.plan = None
-        self.seq = {"plan": plan, "i": 0, "sent_t0": 0.0, "last_ok": False, "abort": False,
-                    "t_start": time.time()}
+        self.seq = {
+            "plan": plan,
+            "i": 0,
+            "sent_t0": 0.0,
+            "last_ok": False,
+            "abort": False,
+            "t_start": time.time(),
+        }
         self.log(f"계획 실행: {plan.summary}")
         self._seq_send_current()
 
@@ -1086,7 +1210,7 @@ class MainWindow(QWidget):
         self.lbl_plan.setText(f"실행 중: {target}")
         if self.send_command("PICK", line, target=target):
             seq["sent_t0"] = self.current["t0"]
-            self.pending_snap = True            # 다음 막대를 찾기 위해 항상 자동 스냅샷
+            self.pending_snap = True  # 다음 막대를 찾기 위해 항상 자동 스냅샷
             self.pending_since = seq["sent_t0"]
         else:
             self._end_seq(False, "PICK 전송 실패")
@@ -1097,11 +1221,11 @@ class MainWindow(QWidget):
         if seq is None or self.busy or not seq["last_ok"]:
             return
         last = seq["i"] >= len(seq["plan"].steps) - 1
-        if self.cam_worker is None:            # 카메라가 꺼지면 다음 막대를 찾을 수 없음
+        if self.cam_worker is None:  # 카메라가 꺼지면 다음 막대를 찾을 수 없음
             self._end_seq(last, "" if last else "카메라가 꺼져 다음 막대를 찾을 수 없음")
             return
         if self.snap_ts <= seq["sent_t0"] or not self.snapshot_valid():
-            return                             # 아직 새 스냅샷 전 → 스냅샷이 찍히면 다시 호출됨
+            return  # 아직 새 스냅샷 전 → 스냅샷이 찍히면 다시 호출됨
         if seq["abort"] and not last:
             self._end_seq(False, "사용자가 취소 (진행 중이던 PICK까지만 실행)")
             return
@@ -1113,7 +1237,9 @@ class MainWindow(QWidget):
         step = plan.steps[seq["i"]]
         new = rematch(step.stick, self.snap_sticks)
         if new is None:
-            self._end_seq(False, f"다음 막대 #{step.stick.idx}를 새 스냅샷에서 찾지 못함 (움직였거나 가려짐)")
+            self._end_seq(
+                False, f"다음 막대 #{step.stick.idx}를 새 스냅샷에서 찾지 못함 (움직였거나 가려짐)"
+            )
             return
         step.stick = new
         self._seq_send_current()
@@ -1128,8 +1254,12 @@ class MainWindow(QWidget):
             if ok and self.mb_ok:
                 self.increment_task_count(SORT_TASK_NO)
                 self.poll_registers()
-            self.add_history({"t0": seq["t_start"], "line": "SORT (정렬 전체)", "target": plan.summary},
-                             ok, reason, elapsed)
+            self.add_history(
+                {"t0": seq["t_start"], "line": "SORT (정렬 전체)", "target": plan.summary},
+                ok,
+                reason,
+                elapsed,
+            )
         if ok:
             self.lbl_plan.setText(f"계획: 완료 ({len(plan.steps)}개, {elapsed:.0f}s)")
             self.log(f"계획 완료: {plan.summary} ({elapsed:.1f}s)")
@@ -1196,8 +1326,10 @@ class MainWindow(QWidget):
         self.btn_listen.setText("듣는 중... (떼면 인식)")
         self.set_task_state(STATE_LISTEN)
         rec = self.recorder
-        QTimer.singleShot(int(config.STT_MAX_SECONDS * 1000) + 200,
-                          lambda: self.stop_listening() if self.recorder is rec and rec.recording else None)
+        QTimer.singleShot(
+            int(config.STT_MAX_SECONDS * 1000) + 200,
+            lambda: self.stop_listening() if self.recorder is rec and rec.recording else None,
+        )
         self.update_buttons()
 
     def stop_listening(self):
@@ -1235,8 +1367,11 @@ class MainWindow(QWidget):
 
     def eventFilter(self, obj, ev):
         """Space를 누르고 있는 동안 녹음 (입력란에 글을 쓰는 중이면 제외)."""
-        if ev.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and \
-                ev.key() == Qt.Key.Key_Space and self.isActiveWindow():
+        if (
+            ev.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease)
+            and ev.key() == Qt.Key.Key_Space
+            and self.isActiveWindow()
+        ):
             fw = QApplication.focusWidget()
             if isinstance(fw, (QLineEdit, QAbstractSpinBox, QPlainTextEdit)):
                 return False
@@ -1245,7 +1380,7 @@ class MainWindow(QWidget):
                     self.start_listening()
                 else:
                     self.stop_listening()
-            return True        # 버튼에 포커스가 있어도 Space로 눌리지 않게 막음
+            return True  # 버튼에 포커스가 있어도 Space로 눌리지 않게 막음
         return super().eventFilter(obj, ev)
 
     # =====================================================================
@@ -1346,7 +1481,7 @@ class MainWindow(QWidget):
                 self.log("로봇 READY 수신")
                 self.update_buttons()
 
-        else:   # DATA, ORDER, "MoveJ Start" 같은 진행 메시지
+        else:  # DATA, ORDER, "MoveJ Start" 같은 진행 메시지
             self.log(f"로봇: {line}")
 
     # =====================================================================
@@ -1422,10 +1557,19 @@ class MainWindow(QWidget):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow([self.hist_table.horizontalHeaderItem(c).text() for c in range(self.hist_table.columnCount())])
+            w.writerow(
+                [
+                    self.hist_table.horizontalHeaderItem(c).text()
+                    for c in range(self.hist_table.columnCount())
+                ]
+            )
             for r in range(self.hist_table.rowCount()):
-                w.writerow([(self.hist_table.item(r, c).text() if self.hist_table.item(r, c) else "")
-                            for c in range(self.hist_table.columnCount())])
+                w.writerow(
+                    [
+                        (self.hist_table.item(r, c).text() if self.hist_table.item(r, c) else "")
+                        for c in range(self.hist_table.columnCount())
+                    ]
+                )
         self.log(f"명령 이력 저장: {path}")
 
     def save_log(self):

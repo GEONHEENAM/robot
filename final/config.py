@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # ============================================================
 ROBOT_IP = "192.168.137.100"
 ROBOT_PORT = 9000
-LOCAL_IP = "127.0.0.1"          # fake_robot.py로 테스트할 때 접속할 주소
+LOCAL_IP = "127.0.0.1"  # fake_robot.py로 테스트할 때 접속할 주소
 
 # ============================================================
 # Modbus (선택: 퀴즈3 server.py로 작업 횟수를 기록할 때만 사용)
@@ -24,23 +24,23 @@ MODBUS_PORT = 5020
 # ============================================================
 # 카메라
 # ============================================================
-CAMERA_INDEX = 0                # 노트북 내장 카메라 = 보통 0, USB 웹캠 = 보통 1
+CAMERA_INDEX = 0  # 노트북 내장 카메라 = 보통 0, USB 웹캠 = 보통 1
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
-CAMERA_USE_DSHOW = True         # 윈도우 DirectShow 백엔드 (카메라 속성 제어가 더 잘 됨)
-CAMERA_DISABLE_AUTOFOCUS = True # 자동초점 끄기 요청 (내장 카메라는 무시되는 경우가 많음)
-CAMERA_FOCUS = 0                # 자동초점을 끈 뒤 고정할 초점 값 (웹캠마다 다름 → 현장 조정)
-CAMERA_LOCK_EXPOSURE = False    # 노출 고정 (웹캠이 오면 True로 바꿔서 시험)
-CAMERA_EXPOSURE = -6            # DirectShow 노출 값 (로그 스케일, 웹캠마다 다름)
+CAMERA_USE_DSHOW = True  # 윈도우 DirectShow 백엔드 (카메라 속성 제어가 더 잘 됨)
+CAMERA_DISABLE_AUTOFOCUS = True  # 자동초점 끄기 요청 (내장 카메라는 무시되는 경우가 많음)
+CAMERA_FOCUS = 0  # 자동초점을 끈 뒤 고정할 초점 값 (웹캠마다 다름 → 현장 조정)
+CAMERA_LOCK_EXPOSURE = False  # 노출 고정 (웹캠이 오면 True로 바꿔서 시험)
+CAMERA_EXPOSURE = -6  # DirectShow 노출 값 (로그 스케일, 웹캠마다 다름)
 
 # ============================================================
 # 파일 경로
 # ============================================================
-VISION_PARAMS_FILE = BASE_DIR / "vision_params.json"   # GUI/단독 실행에서 저장한 HSV 등
-HOMOGRAPHY_FILE = BASE_DIR / "calib" / "H.npy"         # 3단계 캘리브레이션 결과 (픽셀 → 로봇 XY)
+VISION_PARAMS_FILE = BASE_DIR / "vision_params.json"  # GUI/단독 실행에서 저장한 HSV 등
+HOMOGRAPHY_FILE = BASE_DIR / "calib" / "H.npy"  # 3단계 캘리브레이션 결과 (픽셀 → 로봇 XY)
 CAMERA_CALIB_FILE = BASE_DIR / "calib" / "camera.npz"  # (선택) 렌즈 왜곡 보정값 K, dist
-CAPTURE_DIR = BASE_DIR / "captures"                     # 저장한 프레임
-LOG_DIR = BASE_DIR / "logs"                             # 명령 이력 CSV 등
+CAPTURE_DIR = BASE_DIR / "captures"  # 저장한 프레임
+LOG_DIR = BASE_DIR / "logs"  # 명령 이력 CSV 등
 
 # ============================================================
 # 캘리브레이션 전 임시 변환 (GUI·가짜 로봇 테스트 전용)
@@ -49,7 +49,7 @@ LOG_DIR = BASE_DIR / "logs"                             # 명령 이력 CSV 등
 # ============================================================
 ALLOW_DUMMY_HOMOGRAPHY = True
 DUMMY_X_RANGE = (300.0, -300.0)  # 이미지 왼쪽 끝 → 오른쪽 끝에 대응하는 로봇 x (임시)
-DUMMY_Y_RANGE = (700.0, 380.0)   # 이미지 위 끝 → 아래 끝에 대응하는 로봇 y (임시)
+DUMMY_Y_RANGE = (700.0, 380.0)  # 이미지 위 끝 → 아래 끝에 대응하는 로봇 y (임시)
 
 # ============================================================
 # 작업 공간 (로봇 베이스 좌표, mm)
@@ -75,7 +75,7 @@ LEFT_IS_POSITIVE_X = True
 #         models 폴더에 압축 해제 → models/vosk-model-small-ko-0.22/ (안에 am, conf 등 폴더)
 # ============================================================
 VOSK_MODEL_DIR = BASE_DIR / "models" / "vosk-model-small-ko-0.22"
-STT_DEVICE = None            # 마이크 장치 번호 (None = 윈도우 기본 마이크). 목록: python stt.py --devices
-STT_MODE = "grammar_then_free"   # "grammar_then_free" | "free" | "grammar"
-STT_MAX_SECONDS = 8.0        # 누르고 있어도 이 시간이 지나면 녹음 종료
-STT_MIN_SECONDS = 0.4        # 이보다 짧은 녹음은 무시 (버튼 실수)
+STT_DEVICE = None  # 마이크 장치 번호 (None = 윈도우 기본 마이크). 목록: python stt.py --devices
+STT_MODE = "grammar_then_free"  # "grammar_then_free" | "free" | "grammar"
+STT_MAX_SECONDS = 8.0  # 누르고 있어도 이 시간이 지나면 녹음 종료
+STT_MIN_SECONDS = 0.4  # 이보다 짧은 녹음은 무시 (버튼 실수)

@@ -2,7 +2,8 @@
 실행 계획 (5단계): Intent + 스냅샷의 막대 목록 → 로봇이 할 일 목록(Plan)
 
   make_plan(intent, sticks, default_slot) → PlanResult
-  rematch(stick, new_sticks)              → 정렬처럼 여러 번 집을 때, 다음 막대를 새 스냅샷에서 다시 찾기
+  rematch(stick, new_sticks)              → 정렬처럼 여러 번 집을 때,
+                                            다음 막대를 새 스냅샷에서 다시 찾기
 
 원칙
   - 집기 영역 안 + 로봇 좌표가 있는 막대만 후보
@@ -16,14 +17,13 @@
 
 from dataclasses import dataclass, field
 
+import config
 import numpy as np
 
-import config
-
-AMBIG_X_MM = 25.0       # 좌우 판단: 두 막대의 x 차이가 이보다 작으면 애매
-AMBIG_LEN_MM = 5.0      # 길이 판단: 길이 차이가 이보다 작으면 애매
-REMATCH_TOL_MM = 25.0   # 다음 스냅샷에서 같은 막대로 볼 최대 위치 차이
-REMATCH_LEN_MM = 15.0   # 같은 막대로 볼 최대 길이 차이
+AMBIG_X_MM = 25.0  # 좌우 판단: 두 막대의 x 차이가 이보다 작으면 애매
+AMBIG_LEN_MM = 5.0  # 길이 판단: 길이 차이가 이보다 작으면 애매
+REMATCH_TOL_MM = 25.0  # 다음 스냅샷에서 같은 막대로 볼 최대 위치 차이
+REMATCH_LEN_MM = 15.0  # 같은 막대로 볼 최대 길이 차이
 
 
 # ============================================================
@@ -35,7 +35,9 @@ def left_to_right(sticks):
 
 
 def slots_left_to_right():
-    items = sorted(config.PLACE_SLOTS.items(), key=lambda kv: kv[1][0], reverse=config.LEFT_IS_POSITIVE_X)
+    items = sorted(
+        config.PLACE_SLOTS.items(), key=lambda kv: kv[1][0], reverse=config.LEFT_IS_POSITIVE_X
+    )
     return [n for n, _ in items]
 
 
@@ -49,7 +51,7 @@ def side_to_slot(side):
 # ============================================================
 @dataclass
 class Step:
-    stick: object          # vision.Stick
+    stick: object  # vision.Stick
     slot: int
 
     def label(self):
@@ -58,7 +60,7 @@ class Step:
 
 @dataclass
 class Plan:
-    action: str                          # "PICK" | "SORT" | "HOME"
+    action: str  # "PICK" | "SORT" | "HOME"
     steps: list = field(default_factory=list)
     summary: str = ""
     notes: list = field(default_factory=list)
@@ -79,7 +81,11 @@ def _select(target, cands):
     if kind == "only":
         if len(cands) == 1:
             return cands[0], None, None
-        return None, f"막대가 {len(cands)}개라 어떤 막대인지 말해 주세요 (예: 왼쪽 막대, 긴 막대)", None
+        return (
+            None,
+            f"막대가 {len(cands)}개라 어떤 막대인지 말해 주세요 (예: 왼쪽 막대, 긴 막대)",
+            None,
+        )
 
     if kind == "position":
         order = left_to_right(cands)
@@ -87,17 +93,28 @@ def _select(target, cands):
             return order[0], None, "막대가 하나뿐이라 그 막대를 선택"
         if val == "left":
             if abs(order[0].x - order[1].x) < AMBIG_X_MM:
-                return None, "왼쪽 막대가 두 개 비슷한 위치에 있음 → 길이나 순서로 말해 주세요", None
+                return (
+                    None,
+                    "왼쪽 막대가 두 개 비슷한 위치에 있음 → 길이나 순서로 말해 주세요",
+                    None,
+                )
             return order[0], None, None
         if val == "right":
             if abs(order[-1].x - order[-2].x) < AMBIG_X_MM:
-                return None, "오른쪽 막대가 두 개 비슷한 위치에 있음 → 길이나 순서로 말해 주세요", None
+                return (
+                    None,
+                    "오른쪽 막대가 두 개 비슷한 위치에 있음 → 길이나 순서로 말해 주세요",
+                    None,
+                )
             return order[-1], None, None
         # center
         if len(order) % 2 == 0:
             return None, f"막대가 {len(order)}개라 가운데를 정할 수 없음", None
         mid = len(order) // 2
-        if min(abs(order[mid].x - order[mid - 1].x), abs(order[mid + 1].x - order[mid].x)) < AMBIG_X_MM:
+        if (
+            min(abs(order[mid].x - order[mid - 1].x), abs(order[mid + 1].x - order[mid].x))
+            < AMBIG_X_MM
+        ):
             return None, "가운데 막대와 옆 막대의 위치가 너무 가까움", None
         return order[mid], None, None
 
@@ -105,8 +122,15 @@ def _select(target, cands):
         order = sorted(cands, key=lambda s: s.length, reverse=(val == "longest"))
         if len(order) >= 2 and abs(order[0].length - order[1].length) < AMBIG_LEN_MM:
             word = "긴" if val == "longest" else "짧은"
-            return None, (f"가장 {word} 막대 후보 두 개의 길이 차이가 {abs(order[0].length - order[1].length):.1f}mm라 "
-                          f"구분이 어려움 → 위치로 말해 주세요"), None
+            return (
+                None,
+                (
+                    f"가장 {word} 막대 후보 두 개의 길이 차이가 "
+                    f"{abs(order[0].length - order[1].length):.1f}mm라 "
+                    f"구분이 어려움 → 위치로 말해 주세요"
+                ),
+                None,
+            )
         return order[0], None, None
 
     if kind == "index":
@@ -150,11 +174,15 @@ def make_plan(intent, sticks, default_slot):
     if intent.action == "SORT":
         slots = slots_left_to_right()
         if len(cands) > len(slots):
-            return PlanResult(error=f"막대 {len(cands)}개 > 놓기 칸 {len(slots)}개 → 막대를 줄이거나 칸을 늘릴 것")
+            return PlanResult(
+                error=f"막대 {len(cands)}개 > 놓기 칸 {len(slots)}개 → 막대를 줄이거나 칸을 늘릴 것"
+            )
         order = sorted(cands, key=lambda s: s.length, reverse=(intent.order == "desc"))
         steps = [Step(s, slots[i]) for i, s in enumerate(order)]
         word = "긴 것부터" if intent.order == "desc" else "짧은 것부터"
-        plan = Plan("SORT", steps, summary=f"길이순 정렬 ({word}): " + ", ".join(st.label() for st in steps))
+        plan = Plan(
+            "SORT", steps, summary=f"길이순 정렬 ({word}): " + ", ".join(st.label() for st in steps)
+        )
         gaps = [abs(order[i].length - order[i + 1].length) for i in range(len(order) - 1)]
         if gaps and min(gaps) < AMBIG_LEN_MM:
             plan.notes.append(f"길이 차이가 {min(gaps):.1f}mm인 막대가 있어 순서가 틀릴 수 있음")
@@ -166,7 +194,8 @@ def make_plan(intent, sticks, default_slot):
 def rematch(stick, new_sticks, tol=REMATCH_TOL_MM, len_tol=REMATCH_LEN_MM):
     """앞 스냅샷의 stick과 같은 막대를 새 스냅샷에서 찾는다. 없으면 None.
 
-    정렬 중 앞 막대를 집으면서 다른 막대를 건드렸을 수 있으므로, 매번 새 스냅샷 좌표로 바꿔서 집는다.
+    정렬 중 앞 막대를 집으면서 다른 막대를 건드렸을 수 있으므로,
+    매번 새 스냅샷 좌표로 바꿔서 집는다.
     """
     best, best_d = None, None
     for s in new_sticks:

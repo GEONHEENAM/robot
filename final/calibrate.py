@@ -32,16 +32,16 @@ import json
 import time
 from pathlib import Path
 
+import config
 import cv2
 import numpy as np
-
-import config
 from robot_link import RobotError, RobotLink
+
 from vision import PixelToRobot, Undistorter, in_pick_zone, open_camera
 
-MARK_Z = 15.0        # 마커 붙일 때 그리퍼 중심 높이 (mm). 낮을수록 눈대중 오차가 줄어듦
-CHECK_Z = 15.0       # 검증 모드에서 내려갈 높이
-GRID_MARGIN = 30.0   # 격자점을 집기 영역 경계에서 안쪽으로 떨어뜨릴 거리 (mm)
+MARK_Z = 15.0  # 마커 붙일 때 그리퍼 중심 높이 (mm). 낮을수록 눈대중 오차가 줄어듦
+CHECK_Z = 15.0  # 검증 모드에서 내려갈 높이
+GRID_MARGIN = 30.0  # 격자점을 집기 영역 경계에서 안쪽으로 떨어뜨릴 거리 (mm)
 
 
 # ============================================================
@@ -67,7 +67,9 @@ def compute_homography(pixels, points):
     H, _ = cv2.findHomography(src, dst, 0)
     if H is None:
         raise ValueError("호모그래피 계산 실패 (점이 한 줄로 늘어서 있지 않은지 확인)")
-    fit = np.linalg.norm(cv2.perspectiveTransform(src.reshape(-1, 1, 2), H).reshape(-1, 2) - dst, axis=1)
+    fit = np.linalg.norm(
+        cv2.perspectiveTransform(src.reshape(-1, 1, 2), H).reshape(-1, 2) - dst, axis=1
+    )
 
     loo = []
     if len(src) >= 5:
@@ -97,9 +99,12 @@ def refine_click(gray, u, v, radius=30):
         for k in range(1, n):
             area = stats[k, cv2.CC_STAT_AREA]
             bw, bh = stats[k, cv2.CC_STAT_WIDTH], stats[k, cv2.CC_STAT_HEIGHT]
-            touches_edge = (stats[k, cv2.CC_STAT_LEFT] == 0 or stats[k, cv2.CC_STAT_TOP] == 0 or
-                            stats[k, cv2.CC_STAT_LEFT] + bw >= roi.shape[1] or
-                            stats[k, cv2.CC_STAT_TOP] + bh >= roi.shape[0])
+            touches_edge = (
+                stats[k, cv2.CC_STAT_LEFT] == 0
+                or stats[k, cv2.CC_STAT_TOP] == 0
+                or stats[k, cv2.CC_STAT_LEFT] + bw >= roi.shape[1]
+                or stats[k, cv2.CC_STAT_TOP] + bh >= roi.shape[0]
+            )
             if area < 15 or touches_edge:
                 continue
             cx, cy = cents[k][0] + x0, cents[k][1] + y0
@@ -145,14 +150,27 @@ def click_points(frame, labels, title="calibration"):
             img = frame.copy()
             for i, (u, v) in enumerate(pts):
                 cv2.drawMarker(img, (int(u), int(v)), (0, 0, 255), cv2.MARKER_CROSS, 22, 2)
-                cv2.putText(img, str(i + 1), (int(u) + 8, int(v) - 8), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7, (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.putText(
+                    img,
+                    str(i + 1),
+                    (int(u) + 8, int(v) - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
             if len(pts) < len(labels):
-                msg = f"click {len(pts) + 1}/{len(labels)}: {labels[len(pts)]}   (u:undo r:reset q:quit)"
+                msg = (
+                    f"click {len(pts) + 1}/{len(labels)}: {labels[len(pts)]}"
+                    "   (u:undo r:reset q:quit)"
+                )
             else:
                 msg = "all clicked - Enter/Space: OK   u:undo r:reset q:quit"
             cv2.rectangle(img, (0, 0), (img.shape[1], 34), (0, 0, 0), -1)
-            cv2.putText(img, msg, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(
+                img, msg, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1, cv2.LINE_AA
+            )
             cv2.imshow(title, img)
             key = cv2.waitKey(30) & 0xFF
             if key in (ord("q"), 27):
@@ -173,7 +191,7 @@ def click_points(frame, labels, title="calibration"):
 def save_result(H, pixels, points, fit, loo, frame, cam_index):
     calib_dir = config.HOMOGRAPHY_FILE.parent
     calib_dir.mkdir(parents=True, exist_ok=True)
-    if config.HOMOGRAPHY_FILE.exists():   # 이전 결과는 날짜를 붙여 보관
+    if config.HOMOGRAPHY_FILE.exists():  # 이전 결과는 날짜를 붙여 보관
         backup = calib_dir / time.strftime("H_backup_%Y%m%d_%H%M%S.npy")
         config.HOMOGRAPHY_FILE.replace(backup)
         print(f"이전 H.npy 보관: {backup.name}")
@@ -189,16 +207,26 @@ def save_result(H, pixels, points, fit, loo, frame, cam_index):
         "fit_error_mm": [round(float(e), 2) for e in fit],
         "loo_error_mm": [round(float(e), 2) for e in loo],
     }
-    (calib_dir / "calib_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (calib_dir / "calib_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     img = frame.copy()
     mapper = PixelToRobot(H)
-    for i, ((u, v), (x, y)) in enumerate(zip(pixels, points)):
-        pu, pv = mapper.to_pixel([[x, y]])[0]     # 로봇 좌표를 다시 화면으로 → 클릭점과 비교
+    for i, ((u, v), (x, y)) in enumerate(zip(pixels, points, strict=True)):
+        pu, pv = mapper.to_pixel([[x, y]])[0]  # 로봇 좌표를 다시 화면으로 → 클릭점과 비교
         cv2.drawMarker(img, (int(u), int(v)), (0, 0, 255), cv2.MARKER_CROSS, 20, 2)
         cv2.circle(img, (int(pu), int(pv)), 6, (0, 255, 0), 2)
-        cv2.putText(img, f"{i + 1}: {fit[i]:.1f}mm", (int(u) + 8, int(v) - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(
+            img,
+            f"{i + 1}: {fit[i]:.1f}mm",
+            (int(u) + 8, int(v) - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
     cv2.imwrite(str(calib_dir / "calib_result.png"), img)
     print(f"저장: {config.HOMOGRAPHY_FILE}, calib_report.json, calib_result.png")
 
@@ -206,8 +234,8 @@ def save_result(H, pixels, points, fit, loo, frame, cam_index):
 def print_errors(fit, loo, tol):
     print("\n점별 오차 (mm)   적합 / 교차검증")
     for i, f in enumerate(fit):
-        l = f"{loo[i]:.2f}" if len(loo) else "-"
-        print(f"  {i + 1:2d}: {f:6.2f} / {l}")
+        loo_txt = f"{loo[i]:.2f}" if len(loo) else "-"
+        print(f"  {i + 1:2d}: {f:6.2f} / {loo_txt}")
     worst = float(np.nanmax(loo)) if len(loo) else float(np.max(fit))
     print(f"적합 평균 {np.mean(fit):.2f}, 최대 {np.max(fit):.2f}")
     if len(loo):
@@ -241,7 +269,9 @@ def open_cam_or_image(args):
 def run_calibration(args):
     if args.points_file:
         with open(args.points_file, newline="", encoding="utf-8-sig") as f:
-            points = [(float(r[0]), float(r[1])) for r in csv.reader(f) if r and not r[0].startswith("#")]
+            points = [
+                (float(r[0]), float(r[1])) for r in csv.reader(f) if r and not r[0].startswith("#")
+            ]
         link = None
     else:
         points = grid_points(args.cols, args.rows)
@@ -258,7 +288,9 @@ def run_calibration(args):
             input("\n작업 영역(테이블)을 비우고 Enter → 로봇이 첫 점으로 내려갑니다 ")
             for i, (x, y) in enumerate(points, 1):
                 link.move_xy(x, y, MARK_Z)
-                input(f"[{i}/{len(points)}] 그리퍼 중심 바로 아래 테이블에 마커 {i}를 붙이고 Enter ")
+                input(
+                    f"[{i}/{len(points)}] 그리퍼 중심 바로 아래 테이블에 마커 {i}를 붙이고 Enter "
+                )
             link.home()
             time.sleep(1.0)
 
@@ -297,11 +329,18 @@ def run_verify(args):
             if pts is None:
                 break
             x, y = mapper.to_robot(pts)[0]
-            print(f"픽셀 ({pts[0][0]:.1f}, {pts[0][1]:.1f}) → 로봇 ({x:.1f}, {y:.1f}) mm"
-                  f"{'' if in_pick_zone(x, y) else '  (집기 영역 밖)'}")
+            print(
+                f"픽셀 ({pts[0][0]:.1f}, {pts[0][1]:.1f}) → 로봇 ({x:.1f}, {y:.1f}) mm"
+                f"{'' if in_pick_zone(x, y) else '  (집기 영역 밖)'}"
+            )
             if link is None:
                 continue
-            if input(f"로봇을 ({x:.1f}, {y:.1f}, {CHECK_Z:.0f})로 내릴까요? [y/N] ").strip().lower() != "y":
+            if (
+                input(f"로봇을 ({x:.1f}, {y:.1f}, {CHECK_Z:.0f})로 내릴까요? [y/N] ")
+                .strip()
+                .lower()
+                != "y"
+            ):
                 continue
             try:
                 link.move_xy(x, y, CHECK_Z)
@@ -324,10 +363,17 @@ if __name__ == "__main__":
     ap.add_argument("--image", default=None, help="카메라 대신 저장된 사진 사용 (연습용)")
     ap.add_argument("--cols", type=int, default=3)
     ap.add_argument("--rows", type=int, default=3)
-    ap.add_argument("--tol", type=float, default=3.0, help="허용 오차 mm = (그리퍼 벌림 폭 - 막대 폭) / 2 보다 작게")
+    ap.add_argument(
+        "--tol",
+        type=float,
+        default=3.0,
+        help="허용 오차 mm = (그리퍼 벌림 폭 - 막대 폭) / 2 보다 작게",
+    )
     ap.add_argument("--points-file", default=None, help="로봇 없이: 마커 로봇 좌표 CSV (x,y)")
     ap.add_argument("--verify", action="store_true", help="검증 모드")
-    ap.add_argument("--no-robot", action="store_true", help="검증 모드에서 로봇 이동 없이 좌표만 출력")
+    ap.add_argument(
+        "--no-robot", action="store_true", help="검증 모드에서 로봇 이동 없이 좌표만 출력"
+    )
     a = ap.parse_args()
     try:
         run_verify(a) if a.verify else run_calibration(a)

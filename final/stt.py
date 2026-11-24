@@ -28,19 +28,19 @@ import json
 import time
 import wave
 
-import numpy as np
-
 import config
+import numpy as np
 
 try:
     import vosk
+
     vosk.SetLogLevel(-1)
 except ImportError:
     vosk = None
 
 try:
     import sounddevice as sd
-except (ImportError, OSError):     # PortAudio가 없으면 OSError
+except (ImportError, OSError):  # PortAudio가 없으면 OSError
     sd = None
 
 SAMPLE_RATE = 16000
@@ -93,15 +93,25 @@ class Recorder:
         self.chunks = []
         self.t0 = time.time()
         try:
-            self.stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
-                                         device=self.device, callback=self._callback)
+            self.stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="int16",
+                device=self.device,
+                callback=self._callback,
+            )
             self.rate = SAMPLE_RATE
         except Exception:
             # 16kHz를 못 받는 장치 → 장치 기본 샘플레이트로 녹음 후 변환
             info = sd.query_devices(self.device, "input")
             self.rate = int(info["default_samplerate"])
-            self.stream = sd.InputStream(samplerate=self.rate, channels=1, dtype="int16",
-                                         device=self.device, callback=self._callback)
+            self.stream = sd.InputStream(
+                samplerate=self.rate,
+                channels=1,
+                dtype="int16",
+                device=self.device,
+                callback=self._callback,
+            )
         self.stream.start()
 
     def stop(self):
@@ -146,13 +156,22 @@ class SpeechRecognizer:
     def recognize(self, audio):
         """→ {"text", "mode", "grammar_text", "free_text", "seconds", "audio_seconds"}"""
         t0 = time.time()
-        out = {"text": "", "mode": "", "grammar_text": "", "free_text": "",
-               "audio_seconds": len(audio) / SAMPLE_RATE}
-        use_grammar = self.mode in ("grammar", "grammar_then_free") and self.grammar and not self.grammar_error
+        out = {
+            "text": "",
+            "mode": "",
+            "grammar_text": "",
+            "free_text": "",
+            "audio_seconds": len(audio) / SAMPLE_RATE,
+        }
+        use_grammar = (
+            self.mode in ("grammar", "grammar_then_free")
+            and self.grammar
+            and not self.grammar_error
+        )
         if use_grammar:
             try:
                 out["grammar_text"] = self._run(audio, self.grammar)
-            except Exception as e:      # 모델이 문법 제한을 지원하지 않는 경우 → 이후 자유 인식만
+            except Exception as e:  # 모델이 문법 제한을 지원하지 않는 경우 → 이후 자유 인식만
                 self.grammar_error = str(e)
         if out["grammar_text"]:
             out["text"], out["mode"] = out["grammar_text"], "grammar"
@@ -166,13 +185,14 @@ class SpeechRecognizer:
 def load_recognizer():
     """GUI·단독 실행 공용: 명령어 문법을 넣어서 인식기를 만든다."""
     from intent import grammar_phrases
+
     return SpeechRecognizer(phrases=grammar_phrases())
 
 
 # ============================================================
 # 단독 실행
 # ============================================================
-TEST_SENTENCES = [   # 인식률 테스트용 (1일차 테스트, 결과표에 사용)
+TEST_SENTENCES = [  # 인식률 테스트용 (1일차 테스트, 결과표에 사용)
     "왼쪽 막대 집어",
     "오른쪽 막대 집어",
     "가운데 막대 집어",
@@ -189,8 +209,13 @@ TEST_SENTENCES = [   # 인식률 테스트용 (1일차 테스트, 결과표에 �
 def _same_intent(a, b):
     if a is None or b is None:
         return False
-    return (a.action, a.target, a.dest_slot, a.dest_side, a.order) == (b.action, b.target, b.dest_slot,
-                                                                     b.dest_side, b.order)
+    return (a.action, a.target, a.dest_slot, a.dest_side, a.order) == (
+        b.action,
+        b.target,
+        b.dest_slot,
+        b.dest_side,
+        b.order,
+    )
 
 
 def _record_console():
@@ -204,6 +229,7 @@ def _record_console():
 def _judge(text, expected):
     """인식 문장이 기대 문장과 '같은 명령'인지 (승인어는 승인어끼리)."""
     from intent import is_confirm, parse
+
     if is_confirm(expected):
         return is_confirm(text)
     return _same_intent(parse(text).intent, parse(expected).intent)
@@ -211,6 +237,7 @@ def _judge(text, expected):
 
 def run_interactive(r):
     from intent import is_cancel, is_confirm, parse
+
     print("말하고 싶은 명령을 녹음하세요. (q = 종료)")
     while True:
         if input("\nEnter = 녹음 준비 / q = 종료: ").strip().lower() == "q":
@@ -220,23 +247,35 @@ def run_interactive(r):
             print("  너무 짧음")
             continue
         res = r.recognize(audio)
-        print(f"  인식({res['mode']}): '{res['text']}'   [문법 '{res['grammar_text']}' / 자유 '{res['free_text']}']")
+        print(
+            f"  인식({res['mode']}): '{res['text']}'   "
+            f"[문법 '{res['grammar_text']}' / 자유 '{res['free_text']}']"
+        )
         print(f"  녹음 {res['audio_seconds']:.1f}s, 인식 {res['seconds']:.2f}s")
         p = parse(res["text"])
-        print("  해석:", p.intent.describe() if p.intent else p.error,
-              "| 승인어" if is_confirm(res["text"]) else "", "| 취소어" if is_cancel(res["text"]) else "")
+        print(
+            "  해석:",
+            p.intent.describe() if p.intent else p.error,
+            "| 승인어" if is_confirm(res["text"]) else "",
+            "| 취소어" if is_cancel(res["text"]) else "",
+        )
 
 
 def run_test(r, repeat):
     rows = []
-    print(f"인식률 테스트: 문장 {len(TEST_SENTENCES)}개 × {repeat}회. 화면의 문장을 그대로 말하세요.")
+    print(
+        f"인식률 테스트: 문장 {len(TEST_SENTENCES)}개 × {repeat}회. 화면의 문장을 그대로 말하세요."
+    )
     for sent in TEST_SENTENCES:
         for k in range(1, repeat + 1):
             print(f"\n[{sent}]  ({k}/{repeat})")
             audio = _record_console()
             res = r.recognize(audio)
             ok = _judge(res["text"], sent)
-            print(f"  → '{res['text']}' ({res['mode']}, {res['seconds']:.2f}s)  {'정답' if ok else '오답'}")
+            print(
+                f"  → '{res['text']}' ({res['mode']}, {res['seconds']:.2f}s)  "
+                f"{'정답' if ok else '오답'}"
+            )
             rows.append([sent, k, res["text"], res["mode"], f"{res['seconds']:.2f}", int(ok)])
 
     print("\n===== 결과 =====")
@@ -245,7 +284,10 @@ def run_test(r, repeat):
         print(f"  {sent:<16} {sum(x[5] for x in rs)}/{len(rs)}")
     total = sum(x[5] for x in rows)
     avg_t = np.mean([float(x[4]) for x in rows]) if rows else 0
-    print(f"  전체 {total}/{len(rows)} = {100 * total / max(1, len(rows)):.0f}%,  평균 인식 시간 {avg_t:.2f}s")
+    print(
+        f"  전체 {total}/{len(rows)} = {100 * total / max(1, len(rows)):.0f}%,  "
+        f"평균 인식 시간 {avg_t:.2f}s"
+    )
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
     path = config.LOG_DIR / time.strftime("stt_test_%Y%m%d_%H%M%S.csv")
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -270,7 +312,9 @@ if __name__ == "__main__":
     ap.add_argument("--devices", action="store_true", help="마이크 목록 출력")
     ap.add_argument("--test", type=int, default=0, help="인식률 테스트 반복 횟수")
     ap.add_argument("--wav", default=None)
-    ap.add_argument("--mode", default=config.STT_MODE, choices=["grammar_then_free", "free", "grammar"])
+    ap.add_argument(
+        "--mode", default=config.STT_MODE, choices=["grammar_then_free", "free", "grammar"]
+    )
     a = ap.parse_args()
 
     if a.devices:

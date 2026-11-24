@@ -25,10 +25,9 @@ import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
+import config
 import cv2
 import numpy as np
-
-import config
 
 
 # ============================================================
@@ -55,10 +54,10 @@ class VisionParams:
     s_high: int = 255
     v_low: int = 50
     v_high: int = 255
-    min_area: int = 400       # 픽셀 면적 하한 (작은 잡음 제거)
-    min_aspect: float = 2.5   # 긴 변 / 짧은 변 하한 (길쭉한 것만 막대로 인정)
-    blur: int = 5             # 가우시안 블러 커널 (1 이하면 끔, 짝수면 +1)
-    invert: bool = False      # 마스크 반전 (예: 밝은 배경 위 어두운 막대를 V 범위로 잡을 때)
+    min_area: int = 400  # 픽셀 면적 하한 (작은 잡음 제거)
+    min_aspect: float = 2.5  # 긴 변 / 짧은 변 하한 (길쭉한 것만 막대로 인정)
+    blur: int = 5  # 가우시안 블러 커널 (1 이하면 끔, 짝수면 +1)
+    invert: bool = False  # 마스크 반전 (예: 밝은 배경 위 어두운 막대를 V 범위로 잡을 때)
 
     @classmethod
     def load(cls, path=config.VISION_PARAMS_FILE):
@@ -84,17 +83,17 @@ class VisionParams:
 # ============================================================
 @dataclass
 class Stick:
-    idx: int                     # 화면 왼쪽부터 1, 2, 3 ... (프레임마다 다시 매김)
-    box_px: np.ndarray           # 회전 사각형 꼭짓점 4개 (픽셀)
-    center_px: tuple             # (u, v)
-    end_a_px: tuple              # 긴 축 양 끝 (픽셀)
+    idx: int  # 화면 왼쪽부터 1, 2, 3 ... (프레임마다 다시 매김)
+    box_px: np.ndarray  # 회전 사각형 꼭짓점 4개 (픽셀)
+    center_px: tuple  # (u, v)
+    end_a_px: tuple  # 긴 축 양 끝 (픽셀)
     end_b_px: tuple
     length_px: float
     width_px: float
-    angle_px: float              # 이미지 좌표계 긴 축 각도 (참고용)
-    x: float | None = None       # 로봇 베이스 좌표 (mm). 좌표 변환이 없으면 None
+    angle_px: float  # 이미지 좌표계 긴 축 각도 (참고용)
+    x: float | None = None  # 로봇 베이스 좌표 (mm). 좌표 변환이 없으면 None
     y: float | None = None
-    angle: float | None = None   # 로봇 좌표계 긴 축 각도 (deg, -90~90)
+    angle: float | None = None  # 로봇 좌표계 긴 축 각도 (deg, -90~90)
     length: float | None = None  # 막대 길이 (mm)
     in_pick_zone: bool = False
 
@@ -185,7 +184,9 @@ class Undistorter:
         h, w = frame.shape[:2]
         if self._maps is None or self._maps[0] != (w, h):
             new_k, _ = cv2.getOptimalNewCameraMatrix(self.K, self.dist, (w, h), 0)
-            m1, m2 = cv2.initUndistortRectifyMap(self.K, self.dist, None, new_k, (w, h), cv2.CV_16SC2)
+            m1, m2 = cv2.initUndistortRectifyMap(
+                self.K, self.dist, None, new_k, (w, h), cv2.CV_16SC2
+            )
             self._maps = ((w, h), m1, m2)
         return cv2.remap(frame, self._maps[1], self._maps[2], cv2.INTER_LINEAR)
 
@@ -197,7 +198,7 @@ def _long_axis_ends(box):
     """회전 사각형 꼭짓점 4개 → 긴 축 양 끝점 (짧은 변의 중점 2개)."""
     d01 = np.linalg.norm(box[0] - box[1])
     d12 = np.linalg.norm(box[1] - box[2])
-    if d01 >= d12:   # 0-1, 2-3이 긴 변 → 짧은 변은 1-2, 3-0
+    if d01 >= d12:  # 0-1, 2-3이 긴 변 → 짧은 변은 1-2, 3-0
         return (box[1] + box[2]) / 2, (box[3] + box[0]) / 2
     return (box[0] + box[1]) / 2, (box[2] + box[3]) / 2
 
@@ -219,19 +220,26 @@ class StickDetector:
         lo_s, hi_s = np.uint8(p.s_low), np.uint8(p.s_high)
         lo_v, hi_v = np.uint8(p.v_low), np.uint8(p.v_high)
         if p.h_low <= p.h_high:
-            mask = cv2.inRange(hsv, np.array([p.h_low, lo_s, lo_v], np.uint8),
-                               np.array([p.h_high, hi_s, hi_v], np.uint8))
-        else:   # 빨강처럼 0/179를 넘나드는 색: H 하한 > H 상한이면 두 구간을 합친다
-            m1 = cv2.inRange(hsv, np.array([p.h_low, lo_s, lo_v], np.uint8),
-                             np.array([179, hi_s, hi_v], np.uint8))
-            m2 = cv2.inRange(hsv, np.array([0, lo_s, lo_v], np.uint8),
-                             np.array([p.h_high, hi_s, hi_v], np.uint8))
+            mask = cv2.inRange(
+                hsv,
+                np.array([p.h_low, lo_s, lo_v], np.uint8),
+                np.array([p.h_high, hi_s, hi_v], np.uint8),
+            )
+        else:  # 빨강처럼 0/179를 넘나드는 색: H 하한 > H 상한이면 두 구간을 합친다
+            m1 = cv2.inRange(
+                hsv,
+                np.array([p.h_low, lo_s, lo_v], np.uint8),
+                np.array([179, hi_s, hi_v], np.uint8),
+            )
+            m2 = cv2.inRange(
+                hsv, np.array([0, lo_s, lo_v], np.uint8), np.array([p.h_high, hi_s, hi_v], np.uint8)
+            )
             mask = cv2.bitwise_or(m1, m2)
 
         if p.invert:
             mask = cv2.bitwise_not(mask)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._kernel)    # 점 잡음 제거
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)   # 막대 안 구멍 메우기
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._kernel)  # 점 잡음 제거
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel)  # 막대 안 구멍 메우기
         return mask
 
     def detect(self, frame, mapper=None):
@@ -273,7 +281,7 @@ class StickDetector:
                 s.in_pick_zone = in_pick_zone(s.x, s.y)
             found.append(s)
 
-        found.sort(key=lambda s: s.center_px[0])   # 화면 왼쪽부터 번호
+        found.sort(key=lambda s: s.center_px[0])  # 화면 왼쪽부터 번호
         for i, s in enumerate(found, 1):
             s.idx = i
         return found, mask
@@ -282,11 +290,11 @@ class StickDetector:
 # ============================================================
 # 화면 표시
 # ============================================================
-COLOR_OK = (0, 200, 0)          # 집기 영역 안 막대
-COLOR_OUT = (150, 150, 150)     # 집기 영역 밖 막대
-COLOR_TARGET = (0, 140, 255)    # 선택된 막대
-COLOR_ZONE = (255, 200, 0)      # 집기 영역 경계
-COLOR_SLOT = (255, 0, 255)      # 놓기 칸
+COLOR_OK = (0, 200, 0)  # 집기 영역 안 막대
+COLOR_OUT = (150, 150, 150)  # 집기 영역 밖 막대
+COLOR_TARGET = (0, 140, 255)  # 선택된 막대
+COLOR_ZONE = (255, 200, 0)  # 집기 영역 경계
+COLOR_SLOT = (255, 0, 255)  # 놓기 칸
 
 
 def _text(img, s, org, color, scale=0.55, bg=True):
@@ -310,7 +318,7 @@ def draw_detections(img, sticks, mapper=None, target=None, info_lines=(), target
         (x0, x1), (y0, y1) = config.PICK_X_RANGE, config.PICK_Y_RANGE
         zone = mapper.to_pixel([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]).astype(np.int32)
         cv2.polylines(out, [zone], True, COLOR_ZONE, 2)
-        top_left = zone[np.argmin(zone.sum(axis=1))]     # 화면에서 왼쪽 위 꼭짓점에 라벨
+        top_left = zone[np.argmin(zone.sum(axis=1))]  # 화면에서 왼쪽 위 꼭짓점에 라벨
         _text(out, "PICK ZONE", top_left + np.array([4, 18]), COLOR_ZONE, 0.5)
         for n, (sx, sy) in config.PLACE_SLOTS.items():
             u, v = mapper.to_pixel([[sx, sy]])[0]
@@ -373,7 +381,10 @@ def open_camera(index=config.CAMERA_INDEX):
     if config.CAMERA_DISABLE_AUTOFOCUS:
         ok1 = cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
         ok2 = cap.set(cv2.CAP_PROP_FOCUS, config.CAMERA_FOCUS)
-        msgs.append(f"자동초점 끄기 요청 {'수락' if ok1 else '거부'}, 초점 고정 요청 {'수락' if ok2 else '거부'}")
+        msgs.append(
+            f"자동초점 끄기 요청 {'수락' if ok1 else '거부'}, "
+            f"초점 고정 요청 {'수락' if ok2 else '거부'}"
+        )
     if config.CAMERA_LOCK_EXPOSURE:
         ok = cap.set(cv2.CAP_PROP_EXPOSURE, config.CAMERA_EXPOSURE)
         msgs.append(f"노출 고정 요청 {'수락' if ok else '거부'}")
@@ -388,11 +399,16 @@ def open_camera(index=config.CAMERA_INDEX):
 # 단독 실행: 트랙바로 파라미터를 맞추며 검출 결과 확인
 # ============================================================
 _TRACKBARS = [  # (트랙바 이름, 파라미터 이름, 최대값)
-    ("H low", "h_low", 179), ("H high", "h_high", 179),
-    ("S low", "s_low", 255), ("S high", "s_high", 255),
-    ("V low", "v_low", 255), ("V high", "v_high", 255),
-    ("min area", "min_area", 20000), ("aspect x10", "min_aspect", 200),
-    ("blur", "blur", 15), ("invert", "invert", 1),
+    ("H low", "h_low", 179),
+    ("H high", "h_high", 179),
+    ("S low", "s_low", 255),
+    ("S high", "s_high", 255),
+    ("V low", "v_low", 255),
+    ("V high", "v_high", 255),
+    ("min area", "min_area", 20000),
+    ("aspect x10", "min_aspect", 200),
+    ("blur", "blur", 15),
+    ("invert", "invert", 1),
 ]
 
 
@@ -454,11 +470,19 @@ def _run_standalone(args):
             t_prev = now
             if dt > 0:
                 fps = 0.9 * fps + 0.1 * (1.0 / dt)
-            map_txt = "none" if mapper is None else ("DUMMY (not real mm)" if mapper.is_dummy else "CALIBRATED")
-            info = [f"sticks: {len(sticks)}   fps: {fps:.1f}",
-                    f"map: {map_txt}",
-                    "q:quit  m:mask  s:save  p:params  d:print"]
-            cv2.imshow(win, draw_detections(mask if show_mask else frame, sticks, mapper, info_lines=info))
+            map_txt = (
+                "none"
+                if mapper is None
+                else ("DUMMY (not real mm)" if mapper.is_dummy else "CALIBRATED")
+            )
+            info = [
+                f"sticks: {len(sticks)}   fps: {fps:.1f}",
+                f"map: {map_txt}",
+                "q:quit  m:mask  s:save  p:params  d:print",
+            ]
+            cv2.imshow(
+                win, draw_detections(mask if show_mask else frame, sticks, mapper, info_lines=info)
+            )
 
             key = cv2.waitKey(1 if cap is not None else 30) & 0xFF
             if key in (ord("q"), 27):
@@ -477,10 +501,15 @@ def _run_standalone(args):
                 print(f"--- 막대 {len(sticks)}개 ---")
                 for s in sticks:
                     if s.has_robot_coords:
-                        print(f"#{s.idx}: x={s.x:.1f} y={s.y:.1f} angle={s.angle:+.1f} "
-                              f"len={s.length:.1f}mm zone={s.in_pick_zone}")
+                        print(
+                            f"#{s.idx}: x={s.x:.1f} y={s.y:.1f} angle={s.angle:+.1f} "
+                            f"len={s.length:.1f}mm zone={s.in_pick_zone}"
+                        )
                     else:
-                        print(f"#{s.idx}: center={s.center_px} len={s.length_px:.1f}px angle={s.angle_px:+.1f}")
+                        print(
+                            f"#{s.idx}: center={s.center_px} len={s.length_px:.1f}px "
+                            f"angle={s.angle_px:+.1f}"
+                        )
     finally:
         if cap is not None:
             cap.release()

@@ -33,24 +33,56 @@ POSITION_WORDS = {
     "right": ["오른쪽", "오른편", "우측"],
 }
 LONGEST_WORDS = ["제일긴", "가장긴", "제일길", "가장길", "긴거", "긴것", "긴막대", "길쭉", "긴"]
-SHORTEST_WORDS = ["제일짧은", "가장짧은", "짧은거", "짧은것", "짧은막대", "짧은", "제일작은", "작은"]
-ORDINAL_PATTERNS = [   # (정규식, 번호) — "이번"은 "이번에"와 헷갈려서 넣지 않음
+SHORTEST_WORDS = [
+    "제일짧은",
+    "가장짧은",
+    "짧은거",
+    "짧은것",
+    "짧은막대",
+    "짧은",
+    "제일작은",
+    "작은",
+]
+ORDINAL_PATTERNS = [  # (정규식, 번호) — "이번"은 "이번에"와 헷갈려서 넣지 않음
     (r"첫번째|첫째|1번째|1번", 1),
     (r"두번째|둘째|2번째|2번", 2),
     (r"세번째|셋째|3번째|3번", 3),
     (r"네번째|넷째|4번째|4번", 4),
 ]
-SLOT_PATTERNS = [      # 칸을 직접 말한 경우
+SLOT_PATTERNS = [  # 칸을 직접 말한 경우
     (r"(첫번째|첫|1번|일번|1)칸|(첫번째|첫|1번|일번|1)자리|p1|피일|피원", 1),
     (r"(두번째|두|2번|이번|2)칸|(두번째|두|2번|이번|2)자리|p2|피이|피투", 2),
     (r"(세번째|세|3번|삼번|3)칸|(세번째|세|3번|삼번|3)자리|p3|피삼|피쓰리", 3),
 ]
 SORT_WORDS = ["정렬", "순서대로", "순서로", "줄세워", "배열", "나열"]
 SORT_DESC_WORDS = ["긴것부터", "긴거부터", "긴순", "긴막대부터", "내림차순", "큰것부터", "긴것먼저"]
-SORT_ASC_WORDS = ["짧은것부터", "짧은거부터", "짧은순", "짧은막대부터", "오름차순", "작은것부터", "짧은것먼저"]
+SORT_ASC_WORDS = [
+    "짧은것부터",
+    "짧은거부터",
+    "짧은순",
+    "짧은막대부터",
+    "오름차순",
+    "작은것부터",
+    "짧은것먼저",
+]
 HOME_WORDS = ["홈", "원위치", "처음위치", "제자리", "초기위치", "기본위치"]
 # 승인어는 짧은 단어("네", "응")가 다른 문장 속에 섞여 오인되지 않도록 "문장 전체"로 비교한다
-CONFIRM_EXACT = {"실행", "실행해", "실행해줘", "진행", "진행해", "좋아", "오케이", "ok", "응", "네", "예", "그래", "해", "해줘"}
+CONFIRM_EXACT = {
+    "실행",
+    "실행해",
+    "실행해줘",
+    "진행",
+    "진행해",
+    "좋아",
+    "오케이",
+    "ok",
+    "응",
+    "네",
+    "예",
+    "그래",
+    "해",
+    "해줘",
+}
 CONFIRM_PREFIX = ("실행", "진행")
 CANCEL_WORDS = ["취소", "아니", "그만", "멈춰", "정지", "스톱", "하지마"]
 
@@ -68,12 +100,14 @@ def _contains(t, words):
 
 @dataclass
 class Intent:
-    action: str                    # "PICK" | "SORT" | "HOME"
-    target: tuple | None = None    # ("position", "left"|"center"|"right") | ("length", "longest"|"shortest")
-                                   # | ("index", n) | ("only", None) = 막대가 하나뿐일 때만 가능
-    dest_slot: int | None = None   # 칸 번호를 직접 말한 경우
-    dest_side: str | None = None   # "왼쪽에 놔"처럼 위치로 말한 경우 → planner가 칸 번호로 바꿈
-    order: str = "asc"             # 정렬: "asc" = 짧은 것부터, "desc" = 긴 것부터
+    action: str  # "PICK" | "SORT" | "HOME"
+    target: tuple | None = (
+        None  # ("position", "left"|"center"|"right") | ("length", "longest"|"shortest")
+    )
+    # | ("index", n) | ("only", None) = 막대가 하나뿐일 때만 가능
+    dest_slot: int | None = None  # 칸 번호를 직접 말한 경우
+    dest_side: str | None = None  # "왼쪽에 놔"처럼 위치로 말한 경우 → planner가 칸 번호로 바꿈
+    order: str = "asc"  # 정렬: "asc" = 짧은 것부터, "desc" = 긴 것부터
     text: str = ""
 
     def describe(self):
@@ -82,10 +116,12 @@ class Intent:
         if self.action == "SORT":
             return "길이순 정렬 (" + ("긴 것부터" if self.order == "desc" else "짧은 것부터") + ")"
         kind, val = self.target
-        tgt = {"position": lambda v: f"{POSITION_KO[v]} 막대",
-               "length": lambda v: "가장 긴 막대" if v == "longest" else "가장 짧은 막대",
-               "index": lambda v: f"{v}번째 막대 (작업자 기준 왼쪽부터)",
-               "only": lambda v: "하나뿐인 막대"}[kind](val)
+        tgt = {
+            "position": lambda v: f"{POSITION_KO[v]} 막대",
+            "length": lambda v: "가장 긴 막대" if v == "longest" else "가장 짧은 막대",
+            "index": lambda v: f"{v}번째 막대 (작업자 기준 왼쪽부터)",
+            "only": lambda v: "하나뿐인 막대",
+        }[kind](val)
         if self.dest_slot:
             dst = f"P{self.dest_slot}"
         elif self.dest_side:
@@ -123,7 +159,7 @@ def _find_positions(t):
             for m in re.finditer(re.escape(w), t):
                 found.append((m.start(), m.end(), side))
     found.sort()
-    out, last_end = [], -1          # 겹치는 것 제거
+    out, last_end = [], -1  # 겹치는 것 제거
     for s, e, side in found:
         if s >= last_end:
             out.append((s, e, side))
@@ -173,7 +209,7 @@ def parse(text):
         m = re.search(pat, rest)
         if m:
             dest_slot = n
-            rest = rest[:m.start()] + "#" * (m.end() - m.start()) + rest[m.end():]
+            rest = rest[: m.start()] + "#" * (m.end() - m.start()) + rest[m.end() :]
             break
 
     positions = _find_positions(rest)
@@ -185,15 +221,15 @@ def parse(text):
         if m and (ord_pos is None or m.start() < ord_pos):
             ordinal, ord_pos = n, m.start()
 
-    target, target_pos = None, None
+    target = None
     if len_pos is not None or short_pos is not None:
         # 둘 다 나오면 먼저 나온 쪽 ("짧은"이 "긴"보다 먼저 검사되지 않도록 위치로 판단)
         if short_pos is not None and (len_pos is None or short_pos <= len_pos):
-            target, target_pos = ("length", "shortest"), short_pos
+            target = ("length", "shortest")
         else:
-            target, target_pos = ("length", "longest"), len_pos
+            target = ("length", "longest")
     elif ordinal is not None:
-        target, target_pos = ("index", ordinal), ord_pos
+        target = ("index", ordinal)
 
     dest_side = None
     if target is not None:
@@ -217,11 +253,17 @@ def parse(text):
     if target is None:
         if _contains(t, ["집어", "잡아", "옮겨", "놔", "놓아", "가져", "들어"]):
             if dest_slot is not None:
-                return ParseResult(Intent("PICK", target=("only", None), dest_slot=dest_slot, text=text))
-            return ParseResult(error="어떤 막대인지 모르겠음 (예: 왼쪽 막대, 긴 막대, 두 번째 막대)")
+                return ParseResult(
+                    Intent("PICK", target=("only", None), dest_slot=dest_slot, text=text)
+                )
+            return ParseResult(
+                error="어떤 막대인지 모르겠음 (예: 왼쪽 막대, 긴 막대, 두 번째 막대)"
+            )
         return ParseResult(error="명령을 이해하지 못함")
 
-    return ParseResult(Intent("PICK", target=target, dest_slot=dest_slot, dest_side=dest_side, text=text))
+    return ParseResult(
+        Intent("PICK", target=target, dest_slot=dest_slot, dest_side=dest_side, text=text)
+    )
 
 
 # ============================================================
@@ -230,18 +272,47 @@ def parse(text):
 # ============================================================
 def grammar_phrases():
     pos = ["왼쪽", "가운데", "오른쪽"]
-    targets = [f"{p} 막대" for p in pos] + [f"{p} 거" for p in pos] + \
-              ["긴 막대", "짧은 막대", "제일 긴 막대", "제일 짧은 막대", "가장 긴 막대", "가장 짧은 막대",
-               "첫 번째 막대", "두 번째 막대", "세 번째 막대"]
-    dests = [f"{p}에" for p in pos] + [f"{p}으로" for p in pos] + ["첫 번째 칸에", "두 번째 칸에", "세 번째 칸에"]
+    targets = (
+        [f"{p} 막대" for p in pos]
+        + [f"{p} 거" for p in pos]
+        + [
+            "긴 막대",
+            "짧은 막대",
+            "제일 긴 막대",
+            "제일 짧은 막대",
+            "가장 긴 막대",
+            "가장 짧은 막대",
+            "첫 번째 막대",
+            "두 번째 막대",
+            "세 번째 막대",
+        ]
+    )
+    dests = (
+        [f"{p}에" for p in pos]
+        + [f"{p}으로" for p in pos]
+        + ["첫 번째 칸에", "두 번째 칸에", "세 번째 칸에"]
+    )
     verbs = ["집어", "옮겨", "놔", "놓아", "집어 줘", "옮겨 줘", "놔 줘"]
     phrases = []
     for tg in targets:
         phrases.append(f"{tg} 집어")
         for d in dests:
             phrases += [f"{tg} {d} 놔", f"{tg} {d} 옮겨"]
-    phrases += ["길이 순서대로 정렬해", "짧은 것부터 정렬해", "긴 것부터 정렬해", "정렬해", "순서대로 놔",
-                "홈으로 가", "처음 위치로", "원위치", "실행", "취소", "응", "네", "아니"]
+    phrases += [
+        "길이 순서대로 정렬해",
+        "짧은 것부터 정렬해",
+        "긴 것부터 정렬해",
+        "정렬해",
+        "순서대로 놔",
+        "홈으로 가",
+        "처음 위치로",
+        "원위치",
+        "실행",
+        "취소",
+        "응",
+        "네",
+        "아니",
+    ]
     phrases += pos + verbs + ["막대", "칸", "거", "제일", "가장", "긴", "짧은"]
     return sorted(set(phrases))
 

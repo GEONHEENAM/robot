@@ -27,10 +27,13 @@
 ## 설치
 
 ```
-cd C:\work_kw
-kw2026\Scripts\activate
+cd C:\work_kw\robot\final
+..\..\kw2026\Scripts\activate
 pip install -r requirements.txt
 ```
+- `final/requirements.txt`는 저장소 루트의 `requirements.txt`(opencv-contrib-python 등)를 그대로 가져오고 vosk, sounddevice만 추가한다.
+- **opencv-python과 opencv-contrib-python을 같이 설치하면 충돌한다.** `pip list`에 둘 다 있으면 `pip uninstall opencv-python opencv-contrib-python -y` 후 `pip install -r requirements.txt`로 다시 설치.
+- 저장소 CI는 `ruff check .`(한 줄 100자, 규칙 E·F·I·B)와 `pytest`를 돌린다. 코드를 고친 뒤에는 PR 전에 `ruff check .`로 먼저 확인.
 
 ## 1단계: 막대 검출 (노트북 카메라로 가능)
 

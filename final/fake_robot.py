@@ -19,7 +19,7 @@ import time
 
 import config
 
-HOME_XYZ = (0.0, 450.0, 250.0)                    # 보기용 임의값
+HOME_XYZ = (0.0, 450.0, 250.0)  # 보기용 임의값
 HOME_JOINT = (-90.0, 0.0, -90.0, 0.0, -90.0, 0.0)  # 퀴즈3 HOME = posj(-90, 0, -90, 0, -90, 0)
 MIN_DEPTH = 7.5
 PLACE_MARGIN = 2.0
@@ -48,7 +48,7 @@ class FakeRobot:
         self.send(f"{kind} Start")
         self.wait(sec)
         self.xyz = [x, y, z]
-        self.joint[0] = -90.0 + x / 10.0          # 관절값은 화면 확인용으로 대충 바꿈
+        self.joint[0] = -90.0 + x / 10.0  # 관절값은 화면 확인용으로 대충 바꿈
         self.joint[5] = self.joint[0]
         self.send(f"{kind} Done")
         self.send_pos()
@@ -88,7 +88,7 @@ class FakeRobot:
             self.send("Compliance finish,0")
             self.move("MoveL", x, y, 100.0, 0.3)
             self.send("ERROR,0,no contact")
-            self.home()                       # 실제 DRL(drl/main.drl)도 실패 후 홈 복귀
+            self.home()  # 실제 DRL(drl/main.drl)도 실패 후 홈 복귀
             return
         h = random.uniform(8.0, 20.0)
         self.xyz[2] = h
@@ -105,7 +105,7 @@ class FakeRobot:
         self.move("MoveL", sx, sy, grip_z + PLACE_MARGIN, 0.4)
         self.grip(False)
         self.move("MoveL", sx, sy, 100.0, 0.4)
-        self.home()                           # 홈 복귀 → AT_HOME → DONE,3 (drl/main.drl과 같은 순서)
+        self.home()  # 홈 복귀 → AT_HOME → DONE,3 (drl/main.drl과 같은 순서)
         self.send("DONE,3")
 
     def move_xy(self, args):
@@ -116,7 +116,9 @@ class FakeRobot:
             return
         (x0, x1), (y0, y1) = config.PICK_X_RANGE, config.PICK_Y_RANGE
         m = 50.0
-        if z < 5.0 or not (min(x0, x1) - m <= x <= max(x0, x1) + m and min(y0, y1) - m <= y <= max(y0, y1) + m):
+        if z < 5.0 or not (
+            min(x0, x1) - m <= x <= max(x0, x1) + m and min(y0, y1) - m <= y <= max(y0, y1) + m
+        ):
             self.send("ERROR,MOVEXY,out of range")
             return
         self.move("MoveJ", x, y, 100.0)
@@ -124,7 +126,7 @@ class FakeRobot:
         self.send("DONE,9")
 
     def task1(self):
-        for (x, y) in ((0, 500), (100, 450), (-100, 450), (0, 700), (100, 650), (-100, 650)):
+        for x, y in ((0, 500), (100, 450), (-100, 450), (0, 700), (100, 650), (-100, 650)):
             self.move("MoveJ", x, y, 100.0, 0.4)
         self.send("DONE,1")
 
@@ -177,7 +179,7 @@ def serve(host, port, speed, fail_rate):
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((host, port))
     srv.listen(1)
-    srv.settimeout(1.0)     # Ctrl+C가 먹히도록 accept를 1초마다 깨움
+    srv.settimeout(1.0)  # Ctrl+C가 먹히도록 accept를 1초마다 깨움
     print(f"가짜 로봇 서버 대기: {host}:{port}  (speed x{speed}, fail_rate {fail_rate})")
     try:
         while True:
