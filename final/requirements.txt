@@ -1,0 +1,6 @@
+PyQt6
+opencv-python
+numpy
+pymodbus==3.13.1
+vosk
+sounddevice
