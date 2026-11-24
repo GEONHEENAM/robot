@@ -1,0 +1,6 @@
+# 저장소 공통 패키지 (PyQt6, opencv-contrib-python, numpy, pymodbus, mediapipe)
+# ※ opencv-contrib-python과 opencv-python을 같이 설치하면 충돌하므로 opencv-python은 넣지 않는다
+-r ../requirements.txt
+# 최종 프로젝트 6단계 (음성 인식)
+vosk
+sounddevice
